@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/gguf",
+  "crates/runtime",
+  "crates/vulkan-backend",
+  "crates/api",
+  "crates/cli",
+]

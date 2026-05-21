@@ -1,0 +1,21 @@
+[Unit]
+Description=Vulkanize GGUF Inference Server
+After=network.target
+
+[Service]
+Type=simple
+User=vulkanize
+Group=vulkanize
+ExecStart=/usr/local/bin/vulkanize serve --host 127.0.0.1 --port 8000 --model /opt/models/model.gguf
+Restart=on-failure
+RestartSec=5
+
+# Vulkan needs access to GPU devices
+DeviceAllow=/dev/dri rw
+
+# Environment
+Environment=RUST_LOG=info
+Environment=VK_LAYER_PATH=/usr/share/vulkan/explicit_layer.d
+
+[Install]
+WantedBy=multi-user.target

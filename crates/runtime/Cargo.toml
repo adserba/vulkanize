@@ -1,0 +1,8 @@
+[package]
+name = "vulkanize-runtime"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vulkanize-gguf = { path = "../gguf" }
+vulkanize-vulkan-backend = { path = "../vulkan-backend" }

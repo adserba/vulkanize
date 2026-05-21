@@ -1,0 +1,10 @@
+/target/
+**/*.spv
+*.gguf
+*.bin
+*.pt
+*.safetensors
+.vscode/
+.idea/
+*.rs.bk
+Cargo.lock

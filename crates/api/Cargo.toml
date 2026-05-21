@@ -1,0 +1,7 @@
+[package]
+name = "vulkanize-api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vulkanize-runtime = { path = "../runtime" }

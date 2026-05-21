@@ -1,0 +1,12 @@
+[package]
+name = "vulkanize"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "vulkanize"
+path = "src/main.rs"
+
+[dependencies]
+vulkanize-runtime = { path = "../runtime" }
+vulkanize-api = { path = "../api" }
