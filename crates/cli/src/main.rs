@@ -40,12 +40,40 @@ fn main() {
 
     match cli.command {
         Commands::Inspect { model } => {
-            match vulkanize_gguf::parse_header_from_path(&model) {
-                Ok(header) => {
+            match vulkanize_gguf::parse_gguf_full_from_path(&model) {
+                Ok((header, metadata, tensors)) => {
                     println!("GGUF Header:");
                     println!("  version: {}", header.version);
                     println!("  tensors: {}", header.tensor_count);
-                    println!("  metadata entries: {}", header.metadata_kv_count);
+                    println!("  metadata entries: {}", metadata.len());
+                    println!();
+                    if metadata.is_empty() {
+                        println!("(no metadata)");
+                    } else {
+                        println!("Metadata:");
+                        for entry in &metadata.entries {
+                            println!("  {} = {}", entry.key, entry.value);
+                        }
+                    }
+                    println!();
+                    if tensors.is_empty() {
+                        println!("(no tensors)");
+                    } else {
+                        println!("Tensors ({}):", tensors.len());
+                        for t in &tensors.descriptors {
+                            let shape = t
+                                .shape
+                                .iter()
+                                .rev()
+                                .map(|d| d.to_string())
+                                .collect::<Vec<_>>()
+                                .join("x");
+                            println!(
+                                "  {:<45} [{:>10}] {} @ offset {}",
+                                t.name, shape, t.dtype, t.offset
+                            );
+                        }
+                    }
                 }
                 Err(e) => {
                     eprintln!("error: {}", e);
