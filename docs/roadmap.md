@@ -10,8 +10,8 @@
 
 ## Phase 1: GGUF parser
 
-- [ ] Parse GGUF header (magic, version, counts)
-- [ ] Read string table, type definitions
+- [x] Parse GGUF header (magic, version, counts)
+- [x] Read string table, type definitions
 - [ ] Enumerate tensor descriptors with correct offsets
 - [ ] Extract architecture metadata (block count, dimensions, types)
 - [ ] Integration test against a small GGUF file (e.g., `Qwen2.5-0.5B-Q4_0`)
@@ -70,3 +70,44 @@
 - [ ] Kernel fusion opportunities (RMSNorm + projection, etc.)
 - [ ] Vulkan timeline semaphores for multi-batch pipelining
 - [ ] Benchmark suite with automated llama.cpp comparison
+
+## Future server and inference controls
+
+Vulkanize should eventually expose granular runtime controls similar in spirit to mature inference servers, but designed around AMD/Vulkan rather than CUDA/ROCm.
+
+Planned runtime flags:
+
+- model path
+- host / port
+- context size
+- batch size
+- microbatch size
+- AMD GPU device selection
+- KV cache configuration
+- sampling settings:
+  - temperature
+  - top-p
+  - top-k
+  - min-p
+  - repeat penalty
+  - presence penalty
+  - seed
+  - max output tokens
+- memory limits
+- shader/kernel selection
+- pipeline cache options
+- prompt cache controls
+- reusable KV cache controls
+- server concurrency limits
+- OpenAI-compatible API mode
+
+Planned performance features:
+
+- speculative decoding
+- MTP / multi-token prediction support
+- prompt cache
+- reusable KV cache
+- paged KV cache if useful
+- AMD-specific shader variants
+- RDNA3/RDNA4-specific kernel paths
+- cooperative matrix / matrix core support where available
