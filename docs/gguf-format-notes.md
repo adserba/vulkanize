@@ -22,8 +22,7 @@ GGUF (GPT-Generated Unified Format) is the successor to GGML. It stores model we
 │  Tensor headers  │  (tensor count entries)
 │  - name (str)    │
 │  - n_dims (u32)  │
-│  - shape (dims)  │
-│  - stride (dims) │
+│  - shape (u64[]) │
 │  - type (u32)    │
 │  - offset (u64)  │
 ├─────────────────┤
@@ -96,19 +95,20 @@ Not all models have `output.weight` — some tie weights to the embedding matrix
 
 ## Parsing strategy for Vulkanize
 
-1. Memory-map the file with `std::fs::File` + `memmap2`
-2. Read header 4 fields from offset 0
-3. Walk KV pairs, build a `HashMap<String, GGUFValue>`
-4. Walk tensor headers, build `Vec<TensorDescriptor>`
+1. Memory-map the file with `std::fs::File` + `memmap2` (deferred; currently uses `std::fs::read`)
+2. Read header 4 fields from offset 0 — **implemented**
+3. Walk KV pairs, build `GgufMetadata` — **implemented** (scalars only; arrays skipped in offset tracking)
+4. Walk tensor headers, build `Vec<TensorDescriptor>` — **implemented**
 5. Tensor data is accessed via file offset + mmap pointer — never copy to CPU heap
 6. Pass tensor descriptors + mmap handle to runtime for GPU buffer creation
 
 ## Gotchas
 
 - **Padding**: tensor data region starts at a 32-byte aligned offset after all headers. The header's last byte position + pad → tensor data start.
-- **Stride vs shape**: stride is in elements, not bytes. Compute byte size as `stride * type_size`.
+- **No stride in GGUF v3**: GGUF tensor headers contain shape but NOT stride. Compute byte size from `element_count * type_block_size`. (Stride was a GGML v2 concept, not carried forward to GGUF.)
 - **Offset is from file start**: tensor `offset` field is absolute file offset, not relative to data region.
-- **String table**: GGUF strings are UTF-8 with a u32 length prefix (no null terminator).
+- **String format**: GGUF strings are UTF-8 with a u64 length prefix (no null terminator).
+- **Shape order**: shape dimensions are stored big-to-small (e.g., `[rows, cols]` for a matrix).
 - **Big-endian on v2**: GGUF v2 used big-endian for some fields; v3+ is little-endian always.
 
 ## Reference implementations

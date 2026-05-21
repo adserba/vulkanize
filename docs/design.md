@@ -31,8 +31,10 @@ Independent GGUF inference runtime targeting AMD GPUs via Vulkan compute. Not a 
 ### `vulkanize-gguf`
 
 - Parse GGUF header: magic, version, tensor count, string table
-- Expose `ModelMetadata` (architecture, block count, dimensions, data type)
-- Expose `TensorDescriptor` (name, shape, stride, offset, dtype)
+- Expose `GgufMetadata` (key-value pairs; architecture, block count, dimensions)
+- Expose `TensorDescriptor` (name, n_dims, shape, dtype, offset) — **implemented**
+- Expose `GgufTensorType` (36 GGML tensor data types) — **implemented**
+- Expose `parse_gguf_full()` returning `(GgufHeader, GgufMetadata, GgufTensors)` — **implemented**
 - Memory-map the file; do NOT copy weights into CPU memory — pass file handle + offsets to runtime
 - **Must not** execute any tensor computation or depend on Vulkan
 

@@ -5,14 +5,19 @@
 - [x] Repository structure, workspace Cargo.toml
 - [x] Crate stubs with correct dependency graph
 - [x] Design documentation
-- [ ] `.gitignore` and initial commit conventions
+- [x] `.gitignore` and initial commit conventions
 - [ ] Shader build pipeline skeleton
 
 ## Phase 1: GGUF parser
 
 - [x] Parse GGUF header (magic, version, counts)
 - [x] Read string table, type definitions
-- [ ] Enumerate tensor descriptors with correct offsets
+- [x] Enumerate tensor descriptors with correct offsets
+- [x] `GgufTensorType` enum (36 GGML types)
+- [x] `TensorDescriptor` struct (name, n_dims, shape, dtype, offset)
+- [x] `parse_gguf_full()` returning header + metadata + tensors
+- [x] `vulkanize inspect` prints tensor summary
+- [x] 91 unit tests with synthetic GGUF byte arrays
 - [ ] Extract architecture metadata (block count, dimensions, types)
 - [ ] Integration test against a small GGUF file (e.g., `Qwen2.5-0.5B-Q4_0`)
 
