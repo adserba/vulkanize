@@ -8,5 +8,7 @@ name = "vulkanize"
 path = "src/main.rs"
 
 [dependencies]
+clap = { version = "4", features = ["derive"] }
+vulkanize-gguf = { path = "../gguf" }
 vulkanize-runtime = { path = "../runtime" }
 vulkanize-api = { path = "../api" }
