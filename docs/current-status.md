@@ -1,11 +1,11 @@
 # Current Status — Vulkanize
 
-> Last updated: Phase 3 backend preparation complete. Phase 3 runtime integration next.
+> Last updated: Phase 3 GGUF helpers + CPU reference complete. Phase 3 runtime integration next.
 
 ## Build and test status
 
 - `cargo build --release` — clean, 0 warnings
-- `cargo test` — 243 unit tests pass (106 gguf, 137 vulkan-backend)
+- `cargo test` — 312 unit tests pass (154 gguf, 137 vulkan-backend, 21 runtime)
 - `cargo test --test smoke_no_op -- --ignored` — 1 integration test passes (end-to-end GPU dispatch with explicit barriers)
 - `cargo clippy --all-targets --all-features -- -D warnings` — clean
 - 1 integration test (`smoke_no_op`) — ignored by default, passes with `--ignored`
@@ -153,6 +153,26 @@
 - Validates: buffer allocation, upload, readback, shader loading, descriptor sets, pipeline creation, dispatch, synchronization
 - Updated to use explicit memory barriers: `record_barrier_transfer_to_compute` before dispatch, `record_barrier_compute_to_transfer` after dispatch
 
+### Phase 3.1: GGUF tensor helpers + CPU reference
+
+- `GgufTensorType::type_block_size()` — returns bytes per block for all known GGML types (F32=4, F16=2, Q4_0=64, Q5_K=176, etc.), `None` for `Q4_1_F16` (uncertain block size)
+- `GgufTensorType::block_size()` — returns elements per block (1 for non-quantized, 32/64/128 for quantized types)
+- `GgufTensorType::tensor_byte_size(element_count)` — computes total byte size from element count with overflow/alignment guards
+- `GgufTensors::find_tensor(name)` — exact name lookup, returns `Option<&TensorDescriptor>`
+- `GgufTensors::find_token_embedding(&ModelArch)` — finds token embedding tensor with:
+  - Exact `token_embd.weight` name preference
+  - Fallback `_embd.weight` suffix pattern matching with ambiguity detection
+  - Architecture validation: n_dims == 2, one dimension matches `embedding_length`
+  - Returns `(TensorDescriptor, vocab_size)` or `TensorLookupError`
+- `TensorLookupError` — error enum with `NotFound`, `Ambiguous`, `InvalidShape`, `DimensionMismatch`, `UnsupportedType`, `Overflow` variants, implements `Display` + `Error`
+- `read_tensor_bytes(file, desc)` — seeks to tensor offset, computes byte size, reads raw bytes with `read_exact`
+- `runtime::embedding` module — CPU reference implementations for correctness validation:
+  - `embedding_lookup_f32(weights, hidden_dim, token_id)` — column-major embedding table lookup
+  - `f16_to_f32_bytes(bytes)` — IEEE 754 F16 (little-endian) to F32 conversion, handles normal/denormal/zero/inf/NaN
+  - `compare_f32(actual, expected, tolerance)` — element-wise comparison with tolerance, returns detailed mismatch info
+- 48 new unit tests: type_block_size (15), block_size (4), tensor_byte_size (7), find_tensor (2), find_token_embedding (8), TensorLookupError display (4), read_tensor_bytes (5), embedding lookup (3), F16 conversion (11), compare_f32 (5)
+- GGUF crate stays parsing/I/O only — no computation or dequantization
+
 ### Phase 3.0: Backend preparation (multi-buffer descriptors, push constants, barriers)
 
 - `shaders/embedding_lookup.comp.glsl` + `shaders/embedding_lookup.spv` — batched embedding lookup shader:
@@ -177,9 +197,9 @@
 
 | Crate | State | What it does |
 |---|---|---|
-| `vulkanize-gguf` | **Functional** | Parses GGUF v3 files, exposes typed metadata and tensor descriptors |
+| `vulkanize-gguf` | **Functional** | Parses GGUF v3 files, exposes typed metadata and tensor descriptors. Helper methods: `type_block_size()`, `block_size()`, `tensor_byte_size()`. Lookup: `find_tensor()`, `find_token_embedding()`. I/O: `read_tensor_bytes()`. Error: `TensorLookupError`. |
 | `vulkanize-vulkan-backend` | **Functional** | Full Vulkan init through compute dispatch. `VulkanContext` owns instance/device/queue/command pool/memory selector. `VulkanBuffer` provides RAII buffer+memory management. `CommandBuffer` and `Fence` provide command recording, submission, and sync. `ShaderModule` loads SPIR-V. `ComputePipeline` manages pipeline+layout with push constant support. `DescriptorSetLayout`/`DescriptorPool`/`DescriptorSet` manage descriptor lifecycle with multi-buffer layouts. `DescriptorBinding` configures individual bindings. `upload_to_device_local()` and `readback_buffer_data()` provide full CPU↔GPU data movement. `CommandBuffer::dispatch()` executes compute shaders. `CommandBuffer::push_constants()` pushes per-dispatch data. `CommandBuffer::record_barrier_transfer_to_compute()` and `record_barrier_compute_to_transfer()` provide explicit memory synchronization. |
-| `vulkanize-runtime` | **Stub** | `pub fn init() {}` — placeholder |
+| `vulkanize-runtime` | **Partial** | `embedding` module with CPU reference: `embedding_lookup_f32()`, `f16_to_f32_bytes()`, `compare_f32()` for correctness validation |
 | `vulkanize-api` | **Stub** | `pub fn init() {}` — placeholder |
 | `vulkanize` (cli) | **Partial** | `inspect` works, `vulkan-info` works. `generate` and `serve` print "not yet implemented". |
 
@@ -213,17 +233,22 @@ vulkanize serve                     # stub — exits with "not yet implemented"
 | Fence-based synchronization | Done |
 | Explicit memory barriers (transfer↔compute) | Done |
 | Embedding lookup shader (F32) | Done (shader + SPV only) |
+| GGUF tensor byte size calculation | Done |
+| GGUF token embedding lookup | Done |
+| GGUF raw tensor byte reading | Done |
+| CPU reference embedding lookup (F32) | Done |
+| CPU reference F16→F32 conversion | Done |
+| CPU reference float comparison | Done |
 | Uniform buffer descriptors | Not yet |
 
 ## Remaining limitations
 
 - No async dispatch — all operations are synchronous with fence wait
 - No pipeline cache
-- No tensor/weight loading from GGUF files (upload path exists but not integrated with gguf crate)
-- No runtime orchestration for embedding lookup (shader + backend APIs exist, runtime integration is next)
-- No CPU reference computation for validation
+- No runtime orchestration for embedding lookup (shader + backend APIs + GGUF helpers + CPU reference exist, runtime integration is next)
 - No integration test for embedding lookup with real GGUF model
 - Embedding shader is F32 only — F16 and quantized variants not yet implemented
+- `read_tensor_bytes()` requires `std::fs::File` — memory-mapped loading not yet implemented
 
 ## OpenCode workflow assumptions
 

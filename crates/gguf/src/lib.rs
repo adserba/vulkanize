@@ -1,4 +1,5 @@
 use std::fmt;
+use std::io::{Read, Seek};
 
 const GGUF_MAGIC: [u8; 4] = *b"GGUF";
 const HEADER_SIZE: usize = 24;
@@ -319,6 +320,123 @@ impl fmt::Display for GgufTensorType {
     }
 }
 
+impl GgufTensorType {
+    /// Returns the number of bytes in one block of this tensor type.
+    ///
+    /// For non-quantized types (F32, F16, I8, etc.) this equals the bytes
+    /// per element since each block contains exactly one element.
+    ///
+    /// For quantized types this returns the GGML block byte size. To compute
+    /// the total byte size of a tensor, use:
+    /// `element_count / block_size() * type_block_size()`.
+    ///
+    /// Returns `None` for types whose block size is not yet verified.
+    pub fn type_block_size(&self) -> Option<usize> {
+        Some(match self {
+            GgufTensorType::F32 => 4,
+            GgufTensorType::F16 => 2,
+            GgufTensorType::Q4_0 => 64,
+            GgufTensorType::Q4_1 => 66,
+            GgufTensorType::Q8_0 => 66,
+            GgufTensorType::Q8_1 => 68,
+            GgufTensorType::Q5_0 => 72,
+            GgufTensorType::Q5_1 => 74,
+            GgufTensorType::Q2_K => 120,
+            GgufTensorType::Q3_K => 112,
+            GgufTensorType::Q4_K => 144,
+            GgufTensorType::Q5_K => 176,
+            GgufTensorType::Q6_K => 240,
+            GgufTensorType::IQ2_XXS => 36,
+            GgufTensorType::IQ2_XS => 42,
+            GgufTensorType::IQ3_XXS => 66,
+            GgufTensorType::IQ1_S => 32,
+            GgufTensorType::IQ4_NL => 68,
+            GgufTensorType::IQ3_S => 72,
+            GgufTensorType::IQ2_S => 42,
+            GgufTensorType::IQ4_XS => 70,
+            GgufTensorType::I8 => 1,
+            GgufTensorType::I16 => 2,
+            GgufTensorType::I32 => 4,
+            GgufTensorType::I64 => 8,
+            GgufTensorType::F64 => 8,
+            GgufTensorType::IQ1_M => 40,
+            GgufTensorType::BF16 => 2,
+            GgufTensorType::Q4_0_4_4 => 20,
+            GgufTensorType::Q4_0_4_8 => 18,
+            GgufTensorType::Q4_0_8_8 => 24,
+            GgufTensorType::TQ1_0 => 48,
+            GgufTensorType::TQ2_0 => 96,
+            // Block size for Q4_1_F16 is uncertain — do not invent it.
+            GgufTensorType::Q4_1_F16 => return None,
+        })
+    }
+
+    /// Returns the number of elements per block for this tensor type.
+    ///
+    /// For non-quantized types this is always 1.
+    ///
+    /// Returns `None` if `type_block_size()` also returns `None` for this type.
+    pub fn block_size(&self) -> Option<usize> {
+        Some(match self {
+            GgufTensorType::F32
+            | GgufTensorType::F16
+            | GgufTensorType::I8
+            | GgufTensorType::I16
+            | GgufTensorType::I32
+            | GgufTensorType::I64
+            | GgufTensorType::F64
+            | GgufTensorType::BF16 => 1,
+            GgufTensorType::Q4_0
+            | GgufTensorType::Q4_1
+            | GgufTensorType::Q8_0
+            | GgufTensorType::Q8_1
+            | GgufTensorType::Q5_0
+            | GgufTensorType::Q5_1
+            | GgufTensorType::IQ4_NL
+            | GgufTensorType::IQ4_XS
+            | GgufTensorType::Q4_0_4_4
+            | GgufTensorType::Q4_0_4_8
+            | GgufTensorType::Q4_0_8_8
+            | GgufTensorType::Q4_1_F16 => 32,
+            GgufTensorType::Q2_K
+            | GgufTensorType::Q3_K
+            | GgufTensorType::Q4_K
+            | GgufTensorType::Q5_K
+            | GgufTensorType::Q6_K
+            | GgufTensorType::TQ1_0
+            | GgufTensorType::TQ2_0 => 64,
+            GgufTensorType::IQ2_XXS
+            | GgufTensorType::IQ2_XS
+            | GgufTensorType::IQ3_XXS
+            | GgufTensorType::IQ1_S
+            | GgufTensorType::IQ3_S
+            | GgufTensorType::IQ2_S
+            | GgufTensorType::IQ1_M => 128,
+        })
+    }
+
+    /// Compute the total byte size of tensor data for the given element count.
+    ///
+    /// Handles both per-element types (F32, F16, etc.) and block-based
+    /// quantized types (Q4_0, Q5_K, etc.).
+    ///
+    /// Returns `None` if:
+    /// - The type's block size is unknown
+    /// - The element count is not evenly divisible by the block size
+    /// - The multiplication would overflow
+    pub fn tensor_byte_size(&self, element_count: u64) -> Option<u64> {
+        let block_bytes = self.type_block_size()? as u64;
+        let block_elements = self.block_size()? as u64;
+
+        if !element_count.is_multiple_of(block_elements) {
+            return None;
+        }
+
+        let num_blocks = element_count / block_elements;
+        num_blocks.checked_mul(block_bytes)
+    }
+}
+
 /// Parsed GGUF tensor descriptor (metadata only, no data loaded)
 #[derive(Debug, Clone)]
 pub struct TensorDescriptor {
@@ -350,6 +468,218 @@ impl GgufTensors {
     pub fn is_empty(&self) -> bool {
         self.descriptors.is_empty()
     }
+
+    /// Find a tensor descriptor by exact name.
+    pub fn find_tensor(&self, name: &str) -> Option<&TensorDescriptor> {
+        self.descriptors.iter().find(|t| t.name == name)
+    }
+
+    /// Find the token embedding tensor, validated against the model architecture.
+    ///
+    /// Searches for `token_embd.weight` first, then falls back to any tensor
+    /// whose name ends with `_embd.weight`. Validates that the tensor is 2-D
+    /// and that one of its dimensions matches `arch.embedding_length`.
+    ///
+    /// Returns the tensor descriptor and the derived vocabulary size (the
+    /// dimension that is *not* the embedding length).
+    pub fn find_token_embedding(
+        &self,
+        arch: &ModelArch,
+    ) -> Result<(&TensorDescriptor, u64), TensorLookupError> {
+        let embd_len = arch.embedding_length as u64;
+
+        // Prefer exact name match first
+        if let Some(desc) = self.find_tensor("token_embd.weight") {
+            return self.validate_embedding(desc, embd_len);
+        }
+
+        // Fallback: any tensor ending with "_embd.weight"
+        let mut candidates = self
+            .descriptors
+            .iter()
+            .filter(|t| t.name.ends_with("_embd.weight"));
+
+        if let Some(desc) = candidates.next() {
+            if candidates.next().is_some() {
+                return Err(TensorLookupError::Ambiguous {
+                    pattern: "_embd.weight".to_string(),
+                    count: self
+                        .descriptors
+                        .iter()
+                        .filter(|t| t.name.ends_with("_embd.weight"))
+                        .count(),
+                });
+            }
+            return self.validate_embedding(desc, embd_len);
+        }
+
+        Err(TensorLookupError::NotFound {
+            patterns: vec!["token_embd.weight".to_string(), "_embd.weight".to_string()],
+        })
+    }
+
+    fn validate_embedding<'a>(
+        &self,
+        desc: &'a TensorDescriptor,
+        embd_len: u64,
+    ) -> Result<(&'a TensorDescriptor, u64), TensorLookupError> {
+        if desc.n_dims != 2 {
+            return Err(TensorLookupError::InvalidShape {
+                tensor: desc.name.clone(),
+                expected_dims: 2,
+                actual_dims: desc.n_dims,
+            });
+        }
+
+        let dims = &desc.shape;
+        // GGUF stores [embedding_length, vocab_size] or [vocab_size, embedding_length]
+        // One dimension must match embedding_length
+        if dims[0] == embd_len {
+            Ok((desc, dims[1]))
+        } else if dims[1] == embd_len {
+            Ok((desc, dims[0]))
+        } else {
+            Err(TensorLookupError::DimensionMismatch {
+                tensor: desc.name.clone(),
+                expected: embd_len,
+                shape: dims.clone(),
+            })
+        }
+    }
+}
+
+/// Errors from tensor lookup operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TensorLookupError {
+    /// No tensor matched the expected name patterns.
+    NotFound { patterns: Vec<String> },
+    /// Multiple tensors matched the fallback pattern.
+    Ambiguous { pattern: String, count: usize },
+    /// Tensor has unexpected number of dimensions.
+    InvalidShape {
+        tensor: String,
+        expected_dims: u32,
+        actual_dims: u32,
+    },
+    /// Neither dimension matches the expected embedding length.
+    DimensionMismatch {
+        tensor: String,
+        expected: u64,
+        shape: Vec<u64>,
+    },
+    /// The tensor type does not support byte-size calculation.
+    UnsupportedType {
+        tensor: String,
+        dtype: GgufTensorType,
+    },
+    /// Arithmetic overflow when computing byte size.
+    Overflow { tensor: String },
+}
+
+impl fmt::Display for TensorLookupError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TensorLookupError::NotFound { patterns } => {
+                write!(
+                    f,
+                    "no token embedding tensor found; looked for: {:?}",
+                    patterns
+                )
+            }
+            TensorLookupError::Ambiguous { pattern, count } => {
+                write!(
+                    f,
+                    "ambiguous token embedding: {} tensors match pattern '{}'",
+                    count, pattern
+                )
+            }
+            TensorLookupError::InvalidShape {
+                tensor,
+                expected_dims,
+                actual_dims,
+            } => {
+                write!(
+                    f,
+                    "tensor '{}' has {} dimensions, expected {}",
+                    tensor, actual_dims, expected_dims
+                )
+            }
+            TensorLookupError::DimensionMismatch {
+                tensor,
+                expected,
+                shape,
+            } => {
+                write!(
+                    f,
+                    "tensor '{}' shape {:?} does not contain expected embedding length {}",
+                    tensor, shape, expected
+                )
+            }
+            TensorLookupError::UnsupportedType { tensor, dtype } => {
+                write!(
+                    f,
+                    "tensor '{}' has unsupported dtype {} for byte-size calculation",
+                    tensor, dtype
+                )
+            }
+            TensorLookupError::Overflow { tensor } => {
+                write!(f, "tensor '{}' byte size calculation overflowed", tensor)
+            }
+        }
+    }
+}
+
+impl std::error::Error for TensorLookupError {}
+
+/// Read raw tensor bytes from a GGUF file.
+///
+/// Seeks to the tensor's file offset, computes the byte size from the
+/// tensor's shape and dtype, and reads exactly that many bytes.
+///
+/// The `gguf` crate stays parsing/I/O only — this function performs no
+/// computation or dequantization on the returned bytes.
+pub fn read_tensor_bytes(
+    file: &mut std::fs::File,
+    desc: &TensorDescriptor,
+) -> Result<Vec<u8>, TensorLookupError> {
+    let byte_size = desc
+        .dtype
+        .tensor_byte_size(desc.element_count())
+        .ok_or_else(|| {
+            if desc.dtype.type_block_size().is_none() {
+                TensorLookupError::UnsupportedType {
+                    tensor: desc.name.clone(),
+                    dtype: desc.dtype,
+                }
+            } else {
+                TensorLookupError::Overflow {
+                    tensor: desc.name.clone(),
+                }
+            }
+        })?;
+
+    // Guard against converting a huge u64 to usize on 32-bit
+    let byte_size_usize = byte_size
+        .try_into()
+        .map_err(|_| TensorLookupError::Overflow {
+            tensor: desc.name.clone(),
+        })?;
+
+    file.seek(std::io::SeekFrom::Start(desc.offset))
+        .map_err(|e| TensorLookupError::NotFound {
+            patterns: vec![format!("io error seeking to offset {}: {}", desc.offset, e)],
+        })?;
+
+    let mut buf = vec![0u8; byte_size_usize];
+    file.read_exact(&mut buf)
+        .map_err(|e| TensorLookupError::NotFound {
+            patterns: vec![format!(
+                "io error reading tensor '{}' at offset {}: {}",
+                desc.name, desc.offset, e
+            )],
+        })?;
+
+    Ok(buf)
 }
 
 /// Error returned when required architecture metadata is missing.
@@ -2482,5 +2812,567 @@ mod tests {
             key: "k".to_string(),
         });
         assert!(format!("{}", err).contains("k"));
+    }
+
+    // --- type_block_size tests ---
+
+    #[test]
+    fn test_type_block_size_f32() {
+        assert_eq!(GgufTensorType::F32.type_block_size(), Some(4));
+    }
+
+    #[test]
+    fn test_type_block_size_f16() {
+        assert_eq!(GgufTensorType::F16.type_block_size(), Some(2));
+    }
+
+    #[test]
+    fn test_type_block_size_bf16() {
+        assert_eq!(GgufTensorType::BF16.type_block_size(), Some(2));
+    }
+
+    #[test]
+    fn test_type_block_size_i8() {
+        assert_eq!(GgufTensorType::I8.type_block_size(), Some(1));
+    }
+
+    #[test]
+    fn test_type_block_size_i64() {
+        assert_eq!(GgufTensorType::I64.type_block_size(), Some(8));
+    }
+
+    #[test]
+    fn test_type_block_size_f64() {
+        assert_eq!(GgufTensorType::F64.type_block_size(), Some(8));
+    }
+
+    #[test]
+    fn test_type_block_size_q4_0() {
+        assert_eq!(GgufTensorType::Q4_0.type_block_size(), Some(64));
+    }
+
+    #[test]
+    fn test_type_block_size_q8_0() {
+        assert_eq!(GgufTensorType::Q8_0.type_block_size(), Some(66));
+    }
+
+    #[test]
+    fn test_type_block_size_q5_0() {
+        assert_eq!(GgufTensorType::Q5_0.type_block_size(), Some(72));
+    }
+
+    #[test]
+    fn test_type_block_size_q2_k() {
+        assert_eq!(GgufTensorType::Q2_K.type_block_size(), Some(120));
+    }
+
+    #[test]
+    fn test_type_block_size_q3_k() {
+        assert_eq!(GgufTensorType::Q3_K.type_block_size(), Some(112));
+    }
+
+    #[test]
+    fn test_type_block_size_q4_k() {
+        assert_eq!(GgufTensorType::Q4_K.type_block_size(), Some(144));
+    }
+
+    #[test]
+    fn test_type_block_size_q5_k() {
+        assert_eq!(GgufTensorType::Q5_K.type_block_size(), Some(176));
+    }
+
+    #[test]
+    fn test_type_block_size_q6_k() {
+        assert_eq!(GgufTensorType::Q6_K.type_block_size(), Some(240));
+    }
+
+    #[test]
+    fn test_type_block_size_iq2xxs() {
+        assert_eq!(GgufTensorType::IQ2_XXS.type_block_size(), Some(36));
+    }
+
+    #[test]
+    fn test_type_block_size_iq1_s() {
+        assert_eq!(GgufTensorType::IQ1_S.type_block_size(), Some(32));
+    }
+
+    #[test]
+    fn test_type_block_size_iq4_nl() {
+        assert_eq!(GgufTensorType::IQ4_NL.type_block_size(), Some(68));
+    }
+
+    #[test]
+    fn test_type_block_size_q4_1_f16_unsupported() {
+        assert_eq!(GgufTensorType::Q4_1_F16.type_block_size(), None);
+    }
+
+    // --- block_size tests ---
+
+    #[test]
+    fn test_block_size_non_quantized() {
+        assert_eq!(GgufTensorType::F32.block_size(), Some(1));
+        assert_eq!(GgufTensorType::F16.block_size(), Some(1));
+        assert_eq!(GgufTensorType::I8.block_size(), Some(1));
+        assert_eq!(GgufTensorType::BF16.block_size(), Some(1));
+    }
+
+    #[test]
+    fn test_block_size_32_element_types() {
+        assert_eq!(GgufTensorType::Q4_0.block_size(), Some(32));
+        assert_eq!(GgufTensorType::Q8_0.block_size(), Some(32));
+        assert_eq!(GgufTensorType::Q5_0.block_size(), Some(32));
+        assert_eq!(GgufTensorType::IQ4_NL.block_size(), Some(32));
+    }
+
+    #[test]
+    fn test_block_size_64_element_types() {
+        assert_eq!(GgufTensorType::Q2_K.block_size(), Some(64));
+        assert_eq!(GgufTensorType::Q4_K.block_size(), Some(64));
+        assert_eq!(GgufTensorType::Q6_K.block_size(), Some(64));
+    }
+
+    #[test]
+    fn test_block_size_128_element_types() {
+        assert_eq!(GgufTensorType::IQ2_XXS.block_size(), Some(128));
+        assert_eq!(GgufTensorType::IQ1_S.block_size(), Some(128));
+    }
+
+    // --- tensor_byte_size tests ---
+
+    #[test]
+    fn test_tensor_byte_size_f32() {
+        assert_eq!(GgufTensorType::F32.tensor_byte_size(100), Some(400));
+    }
+
+    #[test]
+    fn test_tensor_byte_size_f16() {
+        assert_eq!(GgufTensorType::F16.tensor_byte_size(100), Some(200));
+    }
+
+    #[test]
+    fn test_tensor_byte_size_q4_0() {
+        // 1024 elements / 32 per block * 64 bytes = 2048
+        assert_eq!(GgufTensorType::Q4_0.tensor_byte_size(1024), Some(2048));
+    }
+
+    #[test]
+    fn test_tensor_byte_size_q4_0_not_aligned() {
+        // 100 elements is not divisible by 32-block size
+        assert_eq!(GgufTensorType::Q4_0.tensor_byte_size(100), None);
+    }
+
+    #[test]
+    fn test_tensor_byte_size_q8_0() {
+        // 256 elements / 32 per block * 66 bytes = 528
+        assert_eq!(GgufTensorType::Q8_0.tensor_byte_size(256), Some(528));
+    }
+
+    #[test]
+    fn test_tensor_byte_size_zero() {
+        assert_eq!(GgufTensorType::F32.tensor_byte_size(0), Some(0));
+    }
+
+    #[test]
+    fn test_tensor_byte_size_q4_1_f16_unsupported() {
+        assert_eq!(GgufTensorType::Q4_1_F16.tensor_byte_size(32), None);
+    }
+
+    // --- find_tensor tests ---
+
+    #[test]
+    fn test_find_tensor_exact_match() {
+        let tensors = GgufTensors {
+            descriptors: vec![
+                TensorDescriptor {
+                    name: "token_embd.weight".to_string(),
+                    n_dims: 2,
+                    shape: vec![4096, 32000],
+                    dtype: GgufTensorType::F16,
+                    offset: 0,
+                },
+                TensorDescriptor {
+                    name: "output.weight".to_string(),
+                    n_dims: 2,
+                    shape: vec![32000, 4096],
+                    dtype: GgufTensorType::F32,
+                    offset: 1000,
+                },
+            ],
+        };
+        assert!(tensors.find_tensor("token_embd.weight").is_some());
+        assert!(tensors.find_tensor("output.weight").is_some());
+        assert!(tensors.find_tensor("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_find_tensor_empty() {
+        let tensors = GgufTensors {
+            descriptors: vec![],
+        };
+        assert!(tensors.find_tensor("anything").is_none());
+    }
+
+    // --- find_token_embedding tests ---
+
+    fn make_test_arch(embedding_length: u32) -> ModelArch {
+        ModelArch {
+            architecture: "llama".to_string(),
+            name: None,
+            tokenizer_model: None,
+            block_count: 1,
+            context_length: 512,
+            embedding_length,
+            feed_forward_length: 4096,
+            attention_head_count: 8,
+            attention_head_count_kv: None,
+            rope_freq_base: None,
+            file_type: None,
+        }
+    }
+
+    #[test]
+    fn test_find_token_embedding_exact() {
+        let tensors = GgufTensors {
+            descriptors: vec![TensorDescriptor {
+                name: "token_embd.weight".to_string(),
+                n_dims: 2,
+                shape: vec![4096, 32000],
+                dtype: GgufTensorType::F16,
+                offset: 0,
+            }],
+        };
+        let arch = make_test_arch(4096);
+        let (desc, vocab) = tensors.find_token_embedding(&arch).unwrap();
+        assert_eq!(desc.name, "token_embd.weight");
+        assert_eq!(vocab, 32000);
+    }
+
+    #[test]
+    fn test_find_token_embedding_reversed_dims() {
+        let tensors = GgufTensors {
+            descriptors: vec![TensorDescriptor {
+                name: "token_embd.weight".to_string(),
+                n_dims: 2,
+                shape: vec![32000, 4096],
+                dtype: GgufTensorType::F16,
+                offset: 0,
+            }],
+        };
+        let arch = make_test_arch(4096);
+        let (_desc, vocab) = tensors.find_token_embedding(&arch).unwrap();
+        assert_eq!(vocab, 32000);
+    }
+
+    #[test]
+    fn test_find_token_embedding_fallback_pattern() {
+        let tensors = GgufTensors {
+            descriptors: vec![TensorDescriptor {
+                name: "rope_freq_scale.weight".to_string(),
+                n_dims: 1,
+                shape: vec![1],
+                dtype: GgufTensorType::F32,
+                offset: 0,
+            }],
+        };
+        let arch = make_test_arch(1);
+        // This should NOT match since it doesn't end with _embd.weight
+        assert!(matches!(
+            tensors.find_token_embedding(&arch),
+            Err(TensorLookupError::NotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn test_find_token_embedding_not_found() {
+        let tensors = GgufTensors {
+            descriptors: vec![TensorDescriptor {
+                name: "output.weight".to_string(),
+                n_dims: 2,
+                shape: vec![32000, 4096],
+                dtype: GgufTensorType::F32,
+                offset: 0,
+            }],
+        };
+        let arch = make_test_arch(4096);
+        match tensors.find_token_embedding(&arch) {
+            Err(TensorLookupError::NotFound { patterns }) => {
+                assert!(patterns.contains(&"token_embd.weight".to_string()));
+            }
+            other => panic!("expected NotFound, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_find_token_embedding_invalid_dims() {
+        let tensors = GgufTensors {
+            descriptors: vec![TensorDescriptor {
+                name: "token_embd.weight".to_string(),
+                n_dims: 1,
+                shape: vec![4096],
+                dtype: GgufTensorType::F32,
+                offset: 0,
+            }],
+        };
+        let arch = make_test_arch(4096);
+        match tensors.find_token_embedding(&arch) {
+            Err(TensorLookupError::InvalidShape {
+                expected_dims,
+                actual_dims,
+                ..
+            }) => {
+                assert_eq!(expected_dims, 2);
+                assert_eq!(actual_dims, 1);
+            }
+            other => panic!("expected InvalidShape, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_find_token_embedding_dim_mismatch() {
+        let tensors = GgufTensors {
+            descriptors: vec![TensorDescriptor {
+                name: "token_embd.weight".to_string(),
+                n_dims: 2,
+                shape: vec![2048, 32000],
+                dtype: GgufTensorType::F32,
+                offset: 0,
+            }],
+        };
+        let arch = make_test_arch(4096);
+        match tensors.find_token_embedding(&arch) {
+            Err(TensorLookupError::DimensionMismatch { expected, .. }) => {
+                assert_eq!(expected, 4096);
+            }
+            other => panic!("expected DimensionMismatch, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_find_token_embedding_ambiguous() {
+        let tensors = GgufTensors {
+            descriptors: vec![
+                TensorDescriptor {
+                    name: "a_embd.weight".to_string(),
+                    n_dims: 2,
+                    shape: vec![4096, 32000],
+                    dtype: GgufTensorType::F16,
+                    offset: 0,
+                },
+                TensorDescriptor {
+                    name: "b_embd.weight".to_string(),
+                    n_dims: 2,
+                    shape: vec![4096, 32000],
+                    dtype: GgufTensorType::F16,
+                    offset: 1000,
+                },
+            ],
+        };
+        let arch = make_test_arch(4096);
+        match tensors.find_token_embedding(&arch) {
+            Err(TensorLookupError::Ambiguous { count, .. }) => {
+                assert_eq!(count, 2);
+            }
+            other => panic!("expected Ambiguous, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_find_token_embedding_exact_takes_precedence() {
+        let tensors = GgufTensors {
+            descriptors: vec![
+                TensorDescriptor {
+                    name: "token_embd.weight".to_string(),
+                    n_dims: 2,
+                    shape: vec![4096, 32000],
+                    dtype: GgufTensorType::F16,
+                    offset: 0,
+                },
+                TensorDescriptor {
+                    name: "other_embd.weight".to_string(),
+                    n_dims: 2,
+                    shape: vec![4096, 32000],
+                    dtype: GgufTensorType::F16,
+                    offset: 1000,
+                },
+            ],
+        };
+        let arch = make_test_arch(4096);
+        let (desc, _) = tensors.find_token_embedding(&arch).unwrap();
+        assert_eq!(desc.name, "token_embd.weight");
+    }
+
+    // --- TensorLookupError display tests ---
+
+    #[test]
+    fn test_tensor_lookup_error_display_not_found() {
+        let err = TensorLookupError::NotFound {
+            patterns: vec!["token_embd.weight".to_string()],
+        };
+        let msg = format!("{}", err);
+        assert!(msg.contains("token_embd.weight"));
+    }
+
+    #[test]
+    fn test_tensor_lookup_error_display_ambiguous() {
+        let err = TensorLookupError::Ambiguous {
+            pattern: "_embd".to_string(),
+            count: 3,
+        };
+        let msg = format!("{}", err);
+        assert!(msg.contains("3"));
+        assert!(msg.contains("_embd"));
+    }
+
+    #[test]
+    fn test_tensor_lookup_error_display_invalid_shape() {
+        let err = TensorLookupError::InvalidShape {
+            tensor: "x".to_string(),
+            expected_dims: 2,
+            actual_dims: 3,
+        };
+        let msg = format!("{}", err);
+        assert!(msg.contains("x"));
+        assert!(msg.contains("3"));
+    }
+
+    #[test]
+    fn test_tensor_lookup_error_is_std_error() {
+        let err: Box<dyn std::error::Error> = Box::new(TensorLookupError::NotFound {
+            patterns: vec!["x".to_string()],
+        });
+        assert!(!format!("{}", err).is_empty());
+    }
+
+    // --- read_tensor_bytes tests ---
+
+    #[test]
+    fn test_read_tensor_bytes_f32() {
+        // Create a synthetic file with tensor data at a known offset
+        let mut file_data = vec![0u8; 256];
+        // Write known F32 values at offset 128
+        let values = [1.0f32, 2.0, 3.0, 4.0];
+        let flat: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        file_data[128..128 + flat.len()].copy_from_slice(&flat);
+
+        let desc = TensorDescriptor {
+            name: "test".to_string(),
+            n_dims: 1,
+            shape: vec![4],
+            dtype: GgufTensorType::F32,
+            offset: 128,
+        };
+
+        let tmp = std::env::temp_dir().join("vulkanize_test_tensor.bin");
+        std::fs::write(&tmp, &file_data).unwrap();
+        let mut file = std::fs::File::open(&tmp).unwrap();
+
+        let result = read_tensor_bytes(&mut file, &desc).unwrap();
+        assert_eq!(result.len(), 16); // 4 elements * 4 bytes
+
+        // Verify the f32 values
+        let read_values: [f32; 4] =
+            unsafe { std::ptr::read_unaligned(result.as_ptr() as *const [f32; 4]) };
+        assert_eq!(read_values, values);
+
+        std::fs::remove_file(&tmp).unwrap();
+    }
+
+    #[test]
+    fn test_read_tensor_bytes_f16() {
+        let mut file_data = vec![0u8; 128];
+        // Write known F16 bytes at offset 64: [0x3c00, 0x3e00] (1.0, 2.0 in F16)
+        let f16_bytes: [u8; 4] = [0x00, 0x3c, 0x00, 0x3e];
+        file_data[64..68].copy_from_slice(&f16_bytes);
+
+        let desc = TensorDescriptor {
+            name: "test".to_string(),
+            n_dims: 1,
+            shape: vec![2],
+            dtype: GgufTensorType::F16,
+            offset: 64,
+        };
+
+        let tmp = std::env::temp_dir().join("vulkanize_test_f16.bin");
+        std::fs::write(&tmp, &file_data).unwrap();
+        let mut file = std::fs::File::open(&tmp).unwrap();
+
+        let result = read_tensor_bytes(&mut file, &desc).unwrap();
+        assert_eq!(result.len(), 4); // 2 elements * 2 bytes
+        assert_eq!(result, f16_bytes);
+
+        std::fs::remove_file(&tmp).unwrap();
+    }
+
+    #[test]
+    fn test_read_tensor_bytes_unsupported_type() {
+        let desc = TensorDescriptor {
+            name: "test".to_string(),
+            n_dims: 1,
+            shape: vec![32],
+            dtype: GgufTensorType::Q4_1_F16,
+            offset: 0,
+        };
+
+        let tmp = std::env::temp_dir().join("vulkanize_test_unsup.bin");
+        std::fs::write(&tmp, [0u8; 64]).unwrap();
+        let mut file = std::fs::File::open(&tmp).unwrap();
+
+        match read_tensor_bytes(&mut file, &desc) {
+            Err(TensorLookupError::UnsupportedType { dtype, .. }) => {
+                assert_eq!(dtype, GgufTensorType::Q4_1_F16);
+            }
+            other => panic!("expected UnsupportedType, got {:?}", other),
+        }
+
+        std::fs::remove_file(&tmp).unwrap();
+    }
+
+    #[test]
+    fn test_read_tensor_bytes_truncated() {
+        // File is too small to contain the full tensor
+        let file_data = vec![0u8; 8];
+
+        let desc = TensorDescriptor {
+            name: "test".to_string(),
+            n_dims: 1,
+            shape: vec![4],
+            dtype: GgufTensorType::F32,
+            offset: 4,
+        };
+
+        let tmp = std::env::temp_dir().join("vulkanize_test_trunc.bin");
+        std::fs::write(&tmp, &file_data).unwrap();
+        let mut file = std::fs::File::open(&tmp).unwrap();
+
+        // Should error because we need 16 bytes but only 4 are available
+        assert!(read_tensor_bytes(&mut file, &desc).is_err());
+
+        std::fs::remove_file(&tmp).unwrap();
+    }
+
+    #[test]
+    fn test_read_tensor_bytes_q4_0() {
+        let mut file_data = vec![0u8; 256];
+        // Write 64 bytes (one Q4_0 block) at offset 128
+        let block_data: [u8; 64] = [0xAB; 64];
+        file_data[128..192].copy_from_slice(&block_data);
+
+        let desc = TensorDescriptor {
+            name: "test".to_string(),
+            n_dims: 1,
+            shape: vec![32],
+            dtype: GgufTensorType::Q4_0,
+            offset: 128,
+        };
+
+        let tmp = std::env::temp_dir().join("vulkanize_test_q4.bin");
+        std::fs::write(&tmp, &file_data).unwrap();
+        let mut file = std::fs::File::open(&tmp).unwrap();
+
+        let result = read_tensor_bytes(&mut file, &desc).unwrap();
+        assert_eq!(result.len(), 64);
+        assert_eq!(result, block_data.as_slice());
+
+        std::fs::remove_file(&tmp).unwrap();
     }
 }
