@@ -59,8 +59,11 @@ vulkanize serve --host 127.0.0.1 --port 8000  # OpenAI API server
 
 | Doc | When to read |
 |---|---|
+| `docs/current-status.md` | First — what is built, what is not |
+| `docs/project-vision.md` | Project goals, constraints, non-goals |
 | `docs/design.md` | Architectural decisions, crate contracts |
 | `docs/roadmap.md` | Phase order, what's in scope next |
+| `docs/next-steps.md` | Immediate milestones, risks, workflow |
 | `docs/gguf-format-notes.md` | GGUF parsing details, tensor layout quirks |
 | `docs/amd-vulkan-backend.md` | Vulkan device selection, queue families, memory types on AMD |
 | `docs/server-mode.md` | OpenAI API compatibility requirements |

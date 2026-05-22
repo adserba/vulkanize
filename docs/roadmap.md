@@ -1,5 +1,7 @@
 # Roadmap — Vulkanize
 
+See also: `docs/current-status.md` (what is built), `docs/project-vision.md` (why), `docs/next-steps.md` (what to do next).
+
 ## Phase 0: Foundation
 
 - [x] Repository structure, workspace Cargo.toml
