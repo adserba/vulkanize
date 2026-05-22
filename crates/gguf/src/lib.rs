@@ -349,6 +349,216 @@ impl GgufTensors {
     }
 }
 
+/// Error returned when required architecture metadata is missing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissingMetadata {
+    pub key: String,
+}
+
+impl fmt::Display for MissingMetadata {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "missing metadata key: {}", self.key)
+    }
+}
+
+impl std::error::Error for MissingMetadata {}
+
+/// Look up a metadata entry by key, returning None if not found.
+fn find_entry<'a>(entries: &'a [MetadataEntry], key: &str) -> Option<&'a MetadataEntry> {
+    entries.iter().find(|e| e.key == key)
+}
+
+/// Extract a u32 value from metadata. Accepts any integer type source.
+fn get_u32(entries: &[MetadataEntry], key: &str) -> Option<u32> {
+    let entry = find_entry(entries, key)?;
+    match &entry.value {
+        MetadataValue::Uint8(v) => Some(*v as u32),
+        MetadataValue::Uint16(v) => Some(*v as u32),
+        MetadataValue::Uint32(v) => Some(*v),
+        MetadataValue::Int32(v) => Some(*v as u32),
+        MetadataValue::Uint64(v) => Some(*v as u32),
+        MetadataValue::Int64(v) => Some(*v as u32),
+        _ => None,
+    }
+}
+
+/// Extract an i32 value from metadata. Accepts any integer type source.
+#[allow(dead_code)]
+fn get_i32(entries: &[MetadataEntry], key: &str) -> Option<i32> {
+    let entry = find_entry(entries, key)?;
+    match &entry.value {
+        MetadataValue::Int32(v) => Some(*v),
+        MetadataValue::Uint32(v) => Some(*v as i32),
+        MetadataValue::Int64(v) => Some(*v as i32),
+        MetadataValue::Uint64(v) => Some(*v as i32),
+        _ => None,
+    }
+}
+
+/// Extract a u64 value from metadata. Accepts any integer type source.
+fn get_u64(entries: &[MetadataEntry], key: &str) -> Option<u64> {
+    let entry = find_entry(entries, key)?;
+    match &entry.value {
+        MetadataValue::Uint8(v) => Some(*v as u64),
+        MetadataValue::Uint16(v) => Some(*v as u64),
+        MetadataValue::Uint32(v) => Some(*v as u64),
+        MetadataValue::Uint64(v) => Some(*v),
+        MetadataValue::Int32(v) => Some(*v as u64),
+        MetadataValue::Int64(v) => Some(*v as u64),
+        _ => None,
+    }
+}
+
+/// Extract an f32 value from metadata. Accepts Float32 or Float64 sources.
+fn get_f32(entries: &[MetadataEntry], key: &str) -> Option<f32> {
+    let entry = find_entry(entries, key)?;
+    match &entry.value {
+        MetadataValue::Float32(v) => Some(*v),
+        MetadataValue::Float64(v) => Some(*v as f32),
+        _ => None,
+    }
+}
+
+/// Extract a String value from metadata.
+fn get_string(entries: &[MetadataEntry], key: &str) -> Option<String> {
+    let entry = find_entry(entries, key)?;
+    match &entry.value {
+        MetadataValue::String(v) => Some(v.clone()),
+        _ => None,
+    }
+}
+
+/// Extract a required u32 value, returning MissingMetadata if absent or wrong type.
+fn require_u32(entries: &[MetadataEntry], key: &str) -> Result<u32, MissingMetadata> {
+    get_u32(entries, key).ok_or_else(|| MissingMetadata { key: key.to_string() })
+}
+
+/// Extract a required u64 value, returning MissingMetadata if absent or wrong type.
+fn require_u64(entries: &[MetadataEntry], key: &str) -> Result<u64, MissingMetadata> {
+    get_u64(entries, key).ok_or_else(|| MissingMetadata { key: key.to_string() })
+}
+
+/// Extract a required f32 value, returning MissingMetadata if absent or wrong type.
+#[allow(dead_code)]
+fn require_f32(entries: &[MetadataEntry], key: &str) -> Result<f32, MissingMetadata> {
+    get_f32(entries, key).ok_or_else(|| MissingMetadata { key: key.to_string() })
+}
+
+/// Extract a required String value, returning MissingMetadata if absent or wrong type.
+fn require_string(entries: &[MetadataEntry], key: &str) -> Result<String, MissingMetadata> {
+    get_string(entries, key).ok_or_else(|| MissingMetadata { key: key.to_string() })
+}
+
+/// Extract an optional String value, returning Ok(None) if absent or wrong type.
+#[allow(dead_code)]
+fn optional_string(entries: &[MetadataEntry], key: &str) -> Result<Option<String>, MissingMetadata> {
+    Ok(get_string(entries, key))
+}
+
+/// Extract an optional u32 value, returning Ok(None) if absent or wrong type.
+fn optional_u32(entries: &[MetadataEntry], key: &str) -> Result<Option<u32>, MissingMetadata> {
+    Ok(get_u32(entries, key))
+}
+
+/// Extract an optional u64 value, returning Ok(None) if absent or wrong type.
+#[allow(dead_code)]
+fn optional_u64(entries: &[MetadataEntry], key: &str) -> Result<Option<u64>, MissingMetadata> {
+    Ok(get_u64(entries, key))
+}
+
+/// Extract an optional f32 value, returning Ok(None) if absent or wrong type.
+fn optional_f32(entries: &[MetadataEntry], key: &str) -> Result<Option<f32>, MissingMetadata> {
+    Ok(get_f32(entries, key))
+}
+
+/// Extract a required u32 with architecture-specific prefix.
+fn arch_u32(entries: &[MetadataEntry], arch: &str, field: &str) -> Result<u32, MissingMetadata> {
+    require_u32(entries, &format!("{}.{}", arch, field))
+}
+
+/// Extract a required u64 with architecture-specific prefix.
+fn arch_u64(entries: &[MetadataEntry], arch: &str, field: &str) -> Result<u64, MissingMetadata> {
+    require_u64(entries, &format!("{}.{}", arch, field))
+}
+
+/// Extract a required f32 with architecture-specific prefix.
+#[allow(dead_code)]
+fn arch_f32(entries: &[MetadataEntry], arch: &str, field: &str) -> Result<f32, MissingMetadata> {
+    require_f32(entries, &format!("{}.{}", arch, field))
+}
+
+/// Extract an optional u32 with architecture-specific prefix.
+fn arch_optional_u32(entries: &[MetadataEntry], arch: &str, field: &str) -> Result<Option<u32>, MissingMetadata> {
+    optional_u32(entries, &format!("{}.{}", arch, field))
+}
+
+/// Extract an optional u64 with architecture-specific prefix.
+#[allow(dead_code)]
+fn arch_optional_u64(entries: &[MetadataEntry], arch: &str, field: &str) -> Result<Option<u64>, MissingMetadata> {
+    optional_u64(entries, &format!("{}.{}", arch, field))
+}
+
+/// Extract an optional f32 with architecture-specific prefix.
+fn arch_optional_f32(entries: &[MetadataEntry], arch: &str, field: &str) -> Result<Option<f32>, MissingMetadata> {
+    optional_f32(entries, &format!("{}.{}", arch, field))
+}
+
+/// Extracted architecture metadata for a GGUF model.
+#[derive(Debug, Clone)]
+pub struct ModelArch {
+    /// Value of general.architecture (e.g. "llama", "qwen2")
+    pub architecture: String,
+    /// Value of general.name if present
+    pub name: Option<String>,
+    /// Value of tokenizer.ggml.model if present
+    pub tokenizer_model: Option<String>,
+    /// Number of transformer blocks
+    pub block_count: u32,
+    /// Context length (maximum sequence length)
+    pub context_length: u32,
+    /// Hidden / embedding dimension
+    pub embedding_length: u32,
+    /// Feed-forward (intermediate) dimension
+    pub feed_forward_length: u32,
+    /// Number of attention heads
+    pub attention_head_count: u32,
+    /// Number of KV heads (GQA) — None means same as attention_head_count
+    pub attention_head_count_kv: Option<u32>,
+    /// RoPE frequency base if present
+    pub rope_freq_base: Option<f32>,
+    /// File type (quantization type) if present
+    pub file_type: Option<u32>,
+}
+
+impl GgufMetadata {
+    /// Extract typed architecture metadata from the parsed GGUF metadata.
+    ///
+    /// Detects the architecture name from `general.architecture`, then uses
+    /// the architecture-specific prefix (e.g. `llama.*`, `qwen2.*`) to look
+    /// up the remaining fields.
+    ///
+    /// Returns `MissingMetadata` if any required field is absent or has an
+    /// unexpected type.
+    pub fn extract_model_arch(&self) -> Result<ModelArch, MissingMetadata> {
+        let entries = &self.entries;
+        let architecture = require_string(entries, "general.architecture")?;
+
+        Ok(ModelArch {
+            architecture: architecture.clone(),
+            name: get_string(entries, "general.name"),
+            tokenizer_model: get_string(entries, "tokenizer.ggml.model"),
+            block_count: arch_u32(entries, &architecture, "block_count")?,
+            context_length: arch_u64(entries, &architecture, "context_length")? as u32,
+            embedding_length: arch_u32(entries, &architecture, "embedding_length")?,
+            feed_forward_length: arch_u32(entries, &architecture, "feed_forward_length")?,
+            attention_head_count: arch_u32(entries, &architecture, "attention.head_count")?,
+            attention_head_count_kv: arch_optional_u32(entries, &architecture, "attention.head_count_kv")?,
+            rope_freq_base: arch_optional_f32(entries, &architecture, "rope.freq_base")?,
+            file_type: get_u32(entries, "general.file_type"),
+        })
+    }
+}
+
 /// Parse a GGUF string from bytes at given offset.
 /// Returns (string, bytes_consumed).
 /// String format: u64 length prefix + UTF-8 bytes.
@@ -2000,5 +2210,260 @@ mod tests {
 
         assert_eq!(tensors.descriptors[11].name, "output.weight");
         assert_eq!(tensors.descriptors[11].offset, 1532360960);
+    }
+
+    // --- Architecture metadata extraction tests ---
+
+    #[test]
+    fn test_extract_arch_llama_full() {
+        let bytes = make_gguf(&[
+            ("general.architecture", 8, &encode_string("llama")),
+            ("general.name", 8, &encode_string("Llama-2-7b")),
+            ("tokenizer.ggml.model", 8, &encode_string("llama")),
+            ("llama.block_count", 5, &32u32.to_le_bytes()),
+            ("llama.context_length", 11, &4096u64.to_le_bytes()),
+            ("llama.embedding_length", 5, &4096u32.to_le_bytes()),
+            ("llama.feed_forward_length", 5, &11008u32.to_le_bytes()),
+            ("llama.attention.head_count", 5, &32u32.to_le_bytes()),
+            ("llama.attention.head_count_kv", 5, &4u32.to_le_bytes()),
+            ("llama.rope.freq_base", 6, &f32::to_le_bytes(10000.0)),
+            ("general.file_type", 0, &[0xFF]),
+        ]);
+        let (_, metadata) = parse_gguf(&bytes).unwrap();
+        let arch = metadata.extract_model_arch().unwrap();
+
+        assert_eq!(arch.architecture, "llama");
+        assert_eq!(arch.name, Some("Llama-2-7b".to_string()));
+        assert_eq!(arch.tokenizer_model, Some("llama".to_string()));
+        assert_eq!(arch.block_count, 32);
+        assert_eq!(arch.context_length, 4096);
+        assert_eq!(arch.embedding_length, 4096);
+        assert_eq!(arch.feed_forward_length, 11008);
+        assert_eq!(arch.attention_head_count, 32);
+        assert_eq!(arch.attention_head_count_kv, Some(4));
+        assert_eq!(arch.rope_freq_base, Some(10000.0));
+        assert_eq!(arch.file_type, Some(255));
+    }
+
+    #[test]
+    fn test_extract_arch_llama_minimal() {
+        let bytes = make_gguf(&[
+            ("general.architecture", 8, &encode_string("llama")),
+            ("llama.block_count", 5, &32u32.to_le_bytes()),
+            ("llama.context_length", 11, &4096u64.to_le_bytes()),
+            ("llama.embedding_length", 5, &4096u32.to_le_bytes()),
+            ("llama.feed_forward_length", 5, &11008u32.to_le_bytes()),
+            ("llama.attention.head_count", 5, &32u32.to_le_bytes()),
+        ]);
+        let (_, metadata) = parse_gguf(&bytes).unwrap();
+        let arch = metadata.extract_model_arch().unwrap();
+
+        assert_eq!(arch.architecture, "llama");
+        assert_eq!(arch.name, None);
+        assert_eq!(arch.tokenizer_model, None);
+        assert_eq!(arch.block_count, 32);
+        assert_eq!(arch.attention_head_count_kv, None);
+        assert_eq!(arch.rope_freq_base, None);
+        assert_eq!(arch.file_type, None);
+    }
+
+    #[test]
+    fn test_extract_arch_qwen2() {
+        let bytes = make_gguf(&[
+            ("general.architecture", 8, &encode_string("qwen2")),
+            ("general.name", 8, &encode_string("Qwen2-7B")),
+            ("qwen2.block_count", 5, &32u32.to_le_bytes()),
+            ("qwen2.context_length", 11, &32768u64.to_le_bytes()),
+            ("qwen2.embedding_length", 5, &4096u32.to_le_bytes()),
+            ("qwen2.feed_forward_length", 5, &22016u32.to_le_bytes()),
+            ("qwen2.attention.head_count", 5, &32u32.to_le_bytes()),
+            ("qwen2.attention.head_count_kv", 5, &2u32.to_le_bytes()),
+            ("qwen2.rope.freq_base", 6, &f32::to_le_bytes(1_000_000.0)),
+            ("general.file_type", 0, &[2]),
+        ]);
+        let (_, metadata) = parse_gguf(&bytes).unwrap();
+        let arch = metadata.extract_model_arch().unwrap();
+
+        assert_eq!(arch.architecture, "qwen2");
+        assert_eq!(arch.name, Some("Qwen2-7B".to_string()));
+        assert_eq!(arch.block_count, 32);
+        assert_eq!(arch.context_length, 32768);
+        assert_eq!(arch.embedding_length, 4096);
+        assert_eq!(arch.feed_forward_length, 22016);
+        assert_eq!(arch.attention_head_count, 32);
+        assert_eq!(arch.attention_head_count_kv, Some(2));
+        assert_eq!(arch.rope_freq_base, Some(1_000_000.0));
+        assert_eq!(arch.file_type, Some(2));
+    }
+
+    #[test]
+    fn test_extract_arch_missing_architecture() {
+        let bytes = make_gguf(&[
+            ("llama.block_count", 5, &32u32.to_le_bytes()),
+        ]);
+        let (_, metadata) = parse_gguf(&bytes).unwrap();
+        let err = metadata.extract_model_arch().unwrap_err();
+        assert_eq!(err.key, "general.architecture");
+    }
+
+    #[test]
+    fn test_extract_arch_missing_block_count() {
+        let bytes = make_gguf(&[
+            ("general.architecture", 8, &encode_string("llama")),
+            ("llama.context_length", 11, &4096u64.to_le_bytes()),
+            ("llama.embedding_length", 5, &4096u32.to_le_bytes()),
+            ("llama.feed_forward_length", 5, &11008u32.to_le_bytes()),
+            ("llama.attention.head_count", 5, &32u32.to_le_bytes()),
+        ]);
+        let (_, metadata) = parse_gguf(&bytes).unwrap();
+        let err = metadata.extract_model_arch().unwrap_err();
+        assert_eq!(err.key, "llama.block_count");
+    }
+
+    #[test]
+    fn test_extract_arch_missing_context_length() {
+        let bytes = make_gguf(&[
+            ("general.architecture", 8, &encode_string("llama")),
+            ("llama.block_count", 5, &32u32.to_le_bytes()),
+            ("llama.embedding_length", 5, &4096u32.to_le_bytes()),
+            ("llama.feed_forward_length", 5, &11008u32.to_le_bytes()),
+            ("llama.attention.head_count", 5, &32u32.to_le_bytes()),
+        ]);
+        let (_, metadata) = parse_gguf(&bytes).unwrap();
+        let err = metadata.extract_model_arch().unwrap_err();
+        assert_eq!(err.key, "llama.context_length");
+    }
+
+    #[test]
+    fn test_extract_arch_missing_embedding_length() {
+        let bytes = make_gguf(&[
+            ("general.architecture", 8, &encode_string("llama")),
+            ("llama.block_count", 5, &32u32.to_le_bytes()),
+            ("llama.context_length", 11, &4096u64.to_le_bytes()),
+            ("llama.feed_forward_length", 5, &11008u32.to_le_bytes()),
+            ("llama.attention.head_count", 5, &32u32.to_le_bytes()),
+        ]);
+        let (_, metadata) = parse_gguf(&bytes).unwrap();
+        let err = metadata.extract_model_arch().unwrap_err();
+        assert_eq!(err.key, "llama.embedding_length");
+    }
+
+    #[test]
+    fn test_extract_arch_missing_ffn_length() {
+        let bytes = make_gguf(&[
+            ("general.architecture", 8, &encode_string("llama")),
+            ("llama.block_count", 5, &32u32.to_le_bytes()),
+            ("llama.context_length", 11, &4096u64.to_le_bytes()),
+            ("llama.embedding_length", 5, &4096u32.to_le_bytes()),
+            ("llama.attention.head_count", 5, &32u32.to_le_bytes()),
+        ]);
+        let (_, metadata) = parse_gguf(&bytes).unwrap();
+        let err = metadata.extract_model_arch().unwrap_err();
+        assert_eq!(err.key, "llama.feed_forward_length");
+    }
+
+    #[test]
+    fn test_extract_arch_missing_head_count() {
+        let bytes = make_gguf(&[
+            ("general.architecture", 8, &encode_string("llama")),
+            ("llama.block_count", 5, &32u32.to_le_bytes()),
+            ("llama.context_length", 11, &4096u64.to_le_bytes()),
+            ("llama.embedding_length", 5, &4096u32.to_le_bytes()),
+            ("llama.feed_forward_length", 5, &11008u32.to_le_bytes()),
+        ]);
+        let (_, metadata) = parse_gguf(&bytes).unwrap();
+        let err = metadata.extract_model_arch().unwrap_err();
+        assert_eq!(err.key, "llama.attention.head_count");
+    }
+
+    #[test]
+    fn test_extract_arch_wrong_type() {
+        let bytes = make_gguf(&[
+            ("general.architecture", 8, &encode_string("llama")),
+            ("llama.block_count", 8, &encode_string("not_a_number")),
+            ("llama.context_length", 11, &4096u64.to_le_bytes()),
+            ("llama.embedding_length", 5, &4096u32.to_le_bytes()),
+            ("llama.feed_forward_length", 5, &11008u32.to_le_bytes()),
+            ("llama.attention.head_count", 5, &32u32.to_le_bytes()),
+        ]);
+        let (_, metadata) = parse_gguf(&bytes).unwrap();
+        let err = metadata.extract_model_arch().unwrap_err();
+        assert_eq!(err.key, "llama.block_count");
+    }
+
+    #[test]
+    fn test_extract_arch_int32_block_count() {
+        let bytes = make_gguf(&[
+            ("general.architecture", 8, &encode_string("llama")),
+            ("llama.block_count", 5, &32i32.to_le_bytes()),
+            ("llama.context_length", 11, &4096i64.to_le_bytes()),
+            ("llama.embedding_length", 4, &4096u32.to_le_bytes()),
+            ("llama.feed_forward_length", 11, &11008i64.to_le_bytes()),
+            ("llama.attention.head_count", 10, &32u64.to_le_bytes()),
+        ]);
+        let (_, metadata) = parse_gguf(&bytes).unwrap();
+        let arch = metadata.extract_model_arch().unwrap();
+
+        assert_eq!(arch.block_count, 32);
+        assert_eq!(arch.context_length, 4096);
+        assert_eq!(arch.embedding_length, 4096);
+        assert_eq!(arch.feed_forward_length, 11008);
+        assert_eq!(arch.attention_head_count, 32);
+    }
+
+    #[test]
+    fn test_extract_arch_float64_rope() {
+        let bytes = make_gguf(&[
+            ("general.architecture", 8, &encode_string("llama")),
+            ("llama.block_count", 5, &32u32.to_le_bytes()),
+            ("llama.context_length", 11, &4096u64.to_le_bytes()),
+            ("llama.embedding_length", 5, &4096u32.to_le_bytes()),
+            ("llama.feed_forward_length", 5, &11008u32.to_le_bytes()),
+            ("llama.attention.head_count", 5, &32u32.to_le_bytes()),
+            ("llama.rope.freq_base", 12, &f64::to_le_bytes(10000.0)),
+        ]);
+        let (_, metadata) = parse_gguf(&bytes).unwrap();
+        let arch = metadata.extract_model_arch().unwrap();
+        assert_eq!(arch.rope_freq_base, Some(10000.0));
+    }
+
+    #[test]
+    fn test_extract_arch_unknown_architecture() {
+        let bytes = make_gguf(&[
+            ("general.architecture", 8, &encode_string("mpt")),
+            ("mpt.block_count", 5, &24u32.to_le_bytes()),
+            ("mpt.context_length", 11, &8192u64.to_le_bytes()),
+            ("mpt.embedding_length", 5, &2048u32.to_le_bytes()),
+            ("mpt.feed_forward_length", 5, &8192u32.to_le_bytes()),
+            ("mpt.attention.head_count", 5, &16u32.to_le_bytes()),
+        ]);
+        let (_, metadata) = parse_gguf(&bytes).unwrap();
+        let arch = metadata.extract_model_arch().unwrap();
+
+        assert_eq!(arch.architecture, "mpt");
+        assert_eq!(arch.block_count, 24);
+        assert_eq!(arch.context_length, 8192);
+        assert_eq!(arch.embedding_length, 2048);
+        assert_eq!(arch.feed_forward_length, 8192);
+        assert_eq!(arch.attention_head_count, 16);
+        assert_eq!(arch.attention_head_count_kv, None);
+    }
+
+    #[test]
+    fn test_missing_metadata_display() {
+        let err = MissingMetadata {
+            key: "test.key".to_string(),
+        };
+        let msg = format!("{}", err);
+        assert!(msg.contains("missing metadata key"));
+        assert!(msg.contains("test.key"));
+    }
+
+    #[test]
+    fn test_missing_metadata_is_error() {
+        let err: Box<dyn std::error::Error> = Box::new(MissingMetadata {
+            key: "k".to_string(),
+        });
+        assert!(format!("{}", err).contains("k"));
     }
 }

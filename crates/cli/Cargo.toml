@@ -12,3 +12,5 @@ clap = { version = "4", features = ["derive"] }
 vulkanize-gguf = { path = "../gguf" }
 vulkanize-runtime = { path = "../runtime" }
 vulkanize-api = { path = "../api" }
+vulkanize-vulkan-backend = { path = "../vulkan-backend" }
+ash = "0.37"
