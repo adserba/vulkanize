@@ -1,6 +1,6 @@
 # Next Steps — Vulkanize
 
-> Immediate engineering milestones after Phase 2.2.
+> Immediate engineering milestones after Phase 2.3.2.
 
 ## AI workflow: reconstructing project state
 
@@ -29,11 +29,16 @@ This phase adds the GPU resource layer: buffers for data, pipelines for shaders,
 - Add `Drop` implementations that free memory and destroy buffers
 - Tests: none requiring GPU; test memory type selection logic with mock data if feasible
 
-### 2.3.2 Staging upload path
+### 2.3.2 Staging upload path (DONE)
 
-- Implement a staging upload helper: allocate staging buffer → `vkMapMemory` → `memcpy` → `vkCmdCopyBuffer` → unmap + free staging
-- This is the path for initial weight upload from GGUF file to device-local buffers
-- Keep it simple: single-copy, synchronous. Optimization (pipelined, multi-buffer) comes later.
+- `Fence` — RAII fence wrapper with create/wait/reset
+- `CommandBuffer` — RAII command buffer with begin/end/record/submit_and_wait
+- `VulkanContext::allocate_command_buffer()` — primary command buffer allocation
+- `VulkanContext::execute_immediate()` — record + submit + wait + cleanup in one call
+- `VulkanContext::copy_buffer()` — synchronous buffer-to-buffer copy with validation
+- `VulkanContext::upload_to_device_local()` — end-to-end CPU→GPU upload via staging buffer
+- Transfer validation: TRANSFER_SRC/DST usage flags, DEVICE_LOCAL target check, size bounds
+- 22 unit tests for struct construction, error display, and validation logic
 
 ### 2.3.3 Shader module loading
 

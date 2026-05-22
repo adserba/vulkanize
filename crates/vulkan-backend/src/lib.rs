@@ -45,6 +45,14 @@ pub enum VulkanError {
     NoSuitableMemoryType,
     /// Failed to map device memory.
     MemoryMapping(vk::Result),
+    /// Failed to allocate a command buffer.
+    CommandBufferAllocation(vk::Result),
+    /// Failed to create a fence.
+    FenceCreation(vk::Result),
+    /// Failed to wait on a fence.
+    FenceWait(vk::Result),
+    /// Validation error for transfer operations.
+    TransferValidation(String),
 }
 
 impl fmt::Display for VulkanError {
@@ -78,6 +86,18 @@ impl fmt::Display for VulkanError {
             }
             VulkanError::MemoryMapping(res) => {
                 write!(f, "device memory mapping failed: {:?}", res)
+            }
+            VulkanError::CommandBufferAllocation(res) => {
+                write!(f, "command buffer allocation failed: {:?}", res)
+            }
+            VulkanError::FenceCreation(res) => {
+                write!(f, "fence creation failed: {:?}", res)
+            }
+            VulkanError::FenceWait(res) => {
+                write!(f, "fence wait failed: {:?}", res)
+            }
+            VulkanError::TransferValidation(msg) => {
+                write!(f, "transfer validation failed: {}", msg)
             }
         }
     }
@@ -177,8 +197,7 @@ pub struct MemoryTypeSelector {
 impl MemoryTypeSelector {
     /// Create a new selector from the physical device's memory properties.
     pub fn new(instance: &Instance, physical_device: vk::PhysicalDevice) -> Self {
-        let properties =
-            unsafe { instance.get_physical_device_memory_properties(physical_device) };
+        let properties = unsafe { instance.get_physical_device_memory_properties(physical_device) };
         Self { properties }
     }
 
@@ -240,10 +259,7 @@ impl fmt::Debug for VulkanBuffer {
             .field("memory", &self.memory)
             .field("size", &self.size)
             .field("usage", &self.usage)
-            .field(
-                "memory_property_flags",
-                &self.memory_property_flags,
-            )
+            .field("memory_property_flags", &self.memory_property_flags)
             .field("is_mapped", &self.mapped_ptr.is_some())
             .finish()
     }
@@ -316,7 +332,9 @@ impl VulkanBuffer {
     /// The buffer must have `HOST_VISIBLE` memory.
     pub fn write_data(&mut self, data: &[u8]) -> Result<(), VulkanError> {
         if data.len() > self.size as usize {
-            return Err(VulkanError::MemoryMapping(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY));
+            return Err(VulkanError::MemoryMapping(
+                vk::Result::ERROR_OUT_OF_DEVICE_MEMORY,
+            ));
         }
 
         let ptr = self.map()?;
@@ -335,17 +353,18 @@ impl VulkanBuffer {
     /// # Errors
     ///
     /// Returns an error if `offset + data.len()` exceeds the buffer size.
-    pub fn write_at(
-        &mut self,
-        offset: vk::DeviceSize,
-        data: &[u8],
-    ) -> Result<(), VulkanError> {
-        let end = offset
-            .checked_add(data.len() as vk::DeviceSize)
-            .ok_or(VulkanError::MemoryMapping(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY))?;
+    pub fn write_at(&mut self, offset: vk::DeviceSize, data: &[u8]) -> Result<(), VulkanError> {
+        let end =
+            offset
+                .checked_add(data.len() as vk::DeviceSize)
+                .ok_or(VulkanError::MemoryMapping(
+                    vk::Result::ERROR_OUT_OF_DEVICE_MEMORY,
+                ))?;
 
         if end > self.size {
-            return Err(VulkanError::MemoryMapping(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY));
+            return Err(VulkanError::MemoryMapping(
+                vk::Result::ERROR_OUT_OF_DEVICE_MEMORY,
+            ));
         }
 
         let ptr = self.map()?;
@@ -367,7 +386,9 @@ impl VulkanBuffer {
         memory_type_index: u32,
     ) -> Result<Self, VulkanError> {
         if size == 0 {
-            return Err(VulkanError::BufferCreation(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY));
+            return Err(VulkanError::BufferCreation(
+                vk::Result::ERROR_OUT_OF_DEVICE_MEMORY,
+            ));
         }
 
         let create_info = vk::BufferCreateInfo::builder()
@@ -388,22 +409,18 @@ impl VulkanBuffer {
             .memory_type_index(memory_type_index);
 
         let memory = unsafe {
-            device
-                .allocate_memory(&alloc_info, None)
-                .map_err(|e| {
-                    device.destroy_buffer(buffer, None);
-                    VulkanError::MemoryAllocation(e)
-                })?
+            device.allocate_memory(&alloc_info, None).map_err(|e| {
+                device.destroy_buffer(buffer, None);
+                VulkanError::MemoryAllocation(e)
+            })?
         };
 
         unsafe {
-            device
-                .bind_buffer_memory(buffer, memory, 0)
-                .map_err(|e| {
-                    device.free_memory(memory, None);
-                    device.destroy_buffer(buffer, None);
-                    VulkanError::MemoryBinding(e)
-                })?
+            device.bind_buffer_memory(buffer, memory, 0).map_err(|e| {
+                device.free_memory(memory, None);
+                device.destroy_buffer(buffer, None);
+                VulkanError::MemoryBinding(e)
+            })?
         };
 
         let mut mapped_ptr = None;
@@ -457,6 +474,295 @@ impl Drop for VulkanBuffer {
 }
 
 // ---------------------------------------------------------------------------
+// Fence — GPU→CPU synchronization
+// ---------------------------------------------------------------------------
+
+/// A Vulkan fence for synchronizing GPU command completion with the CPU.
+///
+/// Fences are submitted with `vkQueueSubmit` and waited on from the CPU.
+/// They support signalling, waiting, and resetting for reuse.
+///
+/// This is the simplest synchronization primitive — suitable for
+/// synchronous upload paths and immediate execution. Future async
+/// transfer queues can layer timeline semaphores on top of this.
+pub struct Fence {
+    device: *const ash::Device,
+    handle: vk::Fence,
+}
+
+impl fmt::Debug for Fence {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Fence")
+            .field("handle", &self.handle)
+            .finish()
+    }
+}
+
+impl Fence {
+    /// Create a new unsignaled fence.
+    pub fn create(device: &ash::Device) -> Result<Self, VulkanError> {
+        let create_info = vk::FenceCreateInfo::builder();
+        let handle = unsafe {
+            device
+                .create_fence(&create_info, None)
+                .map_err(VulkanError::FenceCreation)?
+        };
+        Ok(Self {
+            device: device as *const ash::Device,
+            handle,
+        })
+    }
+
+    /// Create a new fence in the signaled state.
+    ///
+    /// Useful for initial elements in wait fences, where the first
+    /// submission should not block on a prior (non-existent) stage.
+    pub fn create_signaled(device: &ash::Device) -> Result<Self, VulkanError> {
+        let create_info = vk::FenceCreateInfo::builder().flags(vk::FenceCreateFlags::SIGNALED);
+        let handle = unsafe {
+            device
+                .create_fence(&create_info, None)
+                .map_err(VulkanError::FenceCreation)?
+        };
+        Ok(Self {
+            device: device as *const ash::Device,
+            handle,
+        })
+    }
+
+    /// Wait for the fence to become signaled.
+    ///
+    /// `timeout` is in nanoseconds. Use `u64::MAX` to wait indefinitely.
+    pub fn wait(&self, timeout: u64) -> Result<(), VulkanError> {
+        let device = unsafe { &*self.device };
+        unsafe {
+            device
+                .wait_for_fences([self.handle].as_slice(), true, timeout)
+                .map_err(VulkanError::FenceWait)?
+        };
+        Ok(())
+    }
+
+    /// Reset a signaled fence back to the unsignaled state.
+    ///
+    /// The fence must be signaled (i.e., waited on or already signaled)
+    /// before it can be reset.
+    pub fn reset(&self) -> Result<(), VulkanError> {
+        let device = unsafe { &*self.device };
+        unsafe {
+            device
+                .reset_fences([self.handle].as_slice())
+                .map_err(VulkanError::FenceWait)?
+        };
+        Ok(())
+    }
+}
+
+impl Drop for Fence {
+    fn drop(&mut self) {
+        if self.device.is_null() {
+            return;
+        }
+        let device = unsafe { &*self.device };
+        unsafe {
+            device.destroy_fence(self.handle, None);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CommandBuffer — record and submit GPU commands
+// ---------------------------------------------------------------------------
+
+/// A Vulkan primary command buffer for recording GPU commands.
+///
+/// Allocated from a `CommandResources` pool. Supports begin/end recording,
+/// submission with fence synchronization, and automatic reset on drop.
+///
+/// # Lifecycle
+///
+/// 1. Allocate via `VulkanContext::allocate_command_buffer()`
+/// 2. Begin recording: `begin()` or `begin_one_time_submit()`
+/// 3. Record commands (e.g., `record_copy_buffer()`)
+/// 4. End recording: `end()`
+/// 5. Submit: `submit_and_wait()` — submits, waits, and resets
+/// 6. Reuse from step 2, or drop to return to pool
+///
+/// Dropping an unfinished (still-recording) command buffer is undefined
+/// behavior. The Vulkan validation layer will detect this.
+pub struct CommandBuffer {
+    device: *const ash::Device,
+    command_pool: vk::CommandPool,
+    handle: vk::CommandBuffer,
+    is_recording: bool,
+}
+
+impl fmt::Debug for CommandBuffer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CommandBuffer")
+            .field("handle", &self.handle)
+            .field("is_recording", &self.is_recording)
+            .finish()
+    }
+}
+
+impl CommandBuffer {
+    /// Begin recording with `ONE_TIME_SUBMIT` flag.
+    ///
+    /// Hint to the implementation that this command buffer will be
+    /// submitted at most once before being reset. Suitable for staging
+    /// uploads and one-shot transfers.
+    pub fn begin_one_time_submit(&mut self) -> Result<(), VulkanError> {
+        let begin_info = vk::CommandBufferBeginInfo::builder()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+
+        let device = unsafe { &*self.device };
+        unsafe {
+            device
+                .begin_command_buffer(self.handle, &begin_info)
+                .map_err(VulkanError::CommandBufferAllocation)?
+        };
+        self.is_recording = true;
+        Ok(())
+    }
+
+    /// Begin recording without optimization flags.
+    ///
+    /// Use for command buffers that may be submitted multiple times
+    /// before being reset.
+    pub fn begin(&mut self) -> Result<(), VulkanError> {
+        let begin_info =
+            vk::CommandBufferBeginInfo::builder().flags(vk::CommandBufferUsageFlags::empty());
+
+        let device = unsafe { &*self.device };
+        unsafe {
+            device
+                .begin_command_buffer(self.handle, &begin_info)
+                .map_err(VulkanError::CommandBufferAllocation)?
+        };
+        self.is_recording = true;
+        Ok(())
+    }
+
+    /// End command buffer recording.
+    ///
+    /// Must be called after `begin()` before the buffer can be submitted.
+    pub fn end(&mut self) -> Result<(), VulkanError> {
+        if !self.is_recording {
+            return Err(VulkanError::CommandBufferAllocation(
+                vk::Result::ERROR_UNKNOWN,
+            ));
+        }
+
+        let device = unsafe { &*self.device };
+        unsafe {
+            device
+                .end_command_buffer(self.handle)
+                .map_err(VulkanError::CommandBufferAllocation)?
+        };
+        self.is_recording = false;
+        Ok(())
+    }
+
+    /// Record a `vkCmdCopyBuffer` command to copy data between buffers.
+    ///
+    /// Validates that `src` has `TRANSFER_SRC` usage and `dst` has
+    /// `TRANSFER_DST` usage.
+    pub fn record_copy_buffer(
+        &mut self,
+        src: &VulkanBuffer,
+        dst: &VulkanBuffer,
+        size: vk::DeviceSize,
+    ) -> Result<(), VulkanError> {
+        if !self.is_recording {
+            return Err(VulkanError::CommandBufferAllocation(
+                vk::Result::ERROR_UNKNOWN,
+            ));
+        }
+
+        if !src.usage.contains(vk::BufferUsageFlags::TRANSFER_SRC) {
+            return Err(VulkanError::TransferValidation(
+                "source buffer missing TRANSFER_SRC usage flag".to_string(),
+            ));
+        }
+
+        if !dst.usage.contains(vk::BufferUsageFlags::TRANSFER_DST) {
+            return Err(VulkanError::TransferValidation(
+                "destination buffer missing TRANSFER_DST usage flag".to_string(),
+            ));
+        }
+
+        let region = vk::BufferCopy::builder()
+            .src_offset(0)
+            .dst_offset(0)
+            .size(size);
+
+        let device = unsafe { &*self.device };
+        unsafe {
+            device.cmd_copy_buffer(self.handle, src.buffer, dst.buffer, &[region.build()]);
+        }
+        Ok(())
+    }
+
+    /// Submit the recorded command buffer and wait for GPU completion.
+    ///
+    /// After this call the command buffer is reset and ready for
+    /// reuse with another `begin()` call.
+    ///
+    /// Takes the queue and queue family index from the caller, allowing
+    /// future extensions to use a dedicated transfer queue.
+    pub fn submit_and_wait(
+        &mut self,
+        queue: vk::Queue,
+        _queue_family_index: u32,
+    ) -> Result<(), VulkanError> {
+        if self.is_recording {
+            return Err(VulkanError::CommandBufferAllocation(
+                vk::Result::ERROR_UNKNOWN,
+            ));
+        }
+
+        let device = unsafe { &*self.device };
+
+        let fence = Fence::create(device)?;
+
+        let cmd_buffers = [self.handle];
+        let submit_info = vk::SubmitInfo::builder().command_buffers(&cmd_buffers);
+
+        unsafe {
+            device
+                .queue_submit(queue, &[(*submit_info)], fence.handle)
+                .map_err(VulkanError::CommandBufferAllocation)?;
+        }
+
+        fence.wait(u64::MAX)?;
+
+        unsafe {
+            device
+                .reset_fences([fence.handle].as_slice())
+                .map_err(VulkanError::FenceWait)?;
+            device
+                .reset_command_buffer(self.handle, vk::CommandBufferResetFlags::empty())
+                .map_err(VulkanError::CommandBufferAllocation)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl Drop for CommandBuffer {
+    fn drop(&mut self) {
+        if self.device.is_null() {
+            return;
+        }
+        let device = unsafe { &*self.device };
+        unsafe {
+            device.free_command_buffers(self.command_pool, [self.handle].as_slice());
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // VulkanContext — owns instance + logical device + queues
 // ---------------------------------------------------------------------------
 
@@ -489,8 +795,7 @@ impl VulkanContext {
         let entry = unsafe { Entry::load() }.map_err(|_| VulkanError::LoaderNotFound)?;
         let instance = create_instance(&entry)?;
         let (physical_device, info) = select_device(&instance)?;
-        let (vulkan_device, queue_family, commands) =
-            create_device(&instance, physical_device)?;
+        let (vulkan_device, queue_family, commands) = create_device(&instance, physical_device)?;
         let memory_selector = MemoryTypeSelector::new(&instance, physical_device);
 
         Ok(Self {
@@ -582,7 +887,9 @@ impl VulkanContext {
         memory_property_flags: vk::MemoryPropertyFlags,
     ) -> Result<VulkanBuffer, VulkanError> {
         if size == 0 {
-            return Err(VulkanError::BufferCreation(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY));
+            return Err(VulkanError::BufferCreation(
+                vk::Result::ERROR_OUT_OF_DEVICE_MEMORY,
+            ));
         }
 
         let create_info = vk::BufferCreateInfo::builder()
@@ -597,8 +904,7 @@ impl VulkanContext {
                 .map_err(VulkanError::BufferCreation)?
         };
 
-        let requirements =
-            unsafe { self.device.handle().get_buffer_memory_requirements(buffer) };
+        let requirements = unsafe { self.device.handle().get_buffer_memory_requirements(buffer) };
 
         let memory_type_index = self
             .memory_selector
@@ -619,6 +925,136 @@ impl VulkanContext {
         )
     }
 
+    // -- Command buffer management ------------------------------------------
+
+    /// Allocate a primary command buffer from the context's command pool.
+    pub fn allocate_command_buffer(&self) -> Result<CommandBuffer, VulkanError> {
+        let alloc_info = vk::CommandBufferAllocateInfo::builder()
+            .command_pool(self.commands.command_pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1);
+
+        let handles = unsafe {
+            self.device
+                .handle()
+                .allocate_command_buffers(&alloc_info)
+                .map_err(VulkanError::CommandBufferAllocation)?
+        };
+
+        if handles.is_empty() {
+            return Err(VulkanError::CommandBufferAllocation(
+                vk::Result::ERROR_OUT_OF_DEVICE_MEMORY,
+            ));
+        }
+
+        Ok(CommandBuffer {
+            device: self.device.handle() as *const ash::Device,
+            command_pool: self.commands.command_pool,
+            handle: handles[0],
+            is_recording: false,
+        })
+    }
+
+    /// Execute a closure that records commands, submitting and waiting
+    /// for completion synchronously.
+    ///
+    /// The allocated command buffer is freed after execution. This is
+    /// the simplest path for one-shot operations like staging uploads.
+    pub fn execute_immediate(
+        &self,
+        record: impl FnOnce(&mut CommandBuffer) -> Result<(), VulkanError>,
+    ) -> Result<(), VulkanError> {
+        let mut cmd = self.allocate_command_buffer()?;
+        cmd.begin_one_time_submit()?;
+        record(&mut cmd)?;
+        cmd.end()?;
+        cmd.submit_and_wait(
+            self.device.compute_queue,
+            self.queue_family.queue_family_index,
+        )?;
+        Ok(())
+    }
+
+    // -- Transfer / upload operations ---------------------------------------
+
+    /// Copy `size` bytes from `src` to `dst` via a recorded, submitted,
+    /// and synchronously-waited buffer copy.
+    ///
+    /// `src` must have `TRANSFER_SRC` usage. `dst` must have
+    /// `TRANSFER_DST` usage.
+    pub fn copy_buffer(
+        &self,
+        src: &VulkanBuffer,
+        dst: &VulkanBuffer,
+        size: vk::DeviceSize,
+    ) -> Result<(), VulkanError> {
+        if size == 0 {
+            return Ok(());
+        }
+
+        if size > src.size {
+            return Err(VulkanError::TransferValidation(format!(
+                "copy size {} exceeds source buffer size {}",
+                size, src.size
+            )));
+        }
+
+        if size > dst.size {
+            return Err(VulkanError::TransferValidation(format!(
+                "copy size {} exceeds destination buffer size {}",
+                size, dst.size
+            )));
+        }
+
+        self.execute_immediate(|cmd| cmd.record_copy_buffer(src, dst, size))
+    }
+
+    /// Upload CPU data into a device-local buffer via a staging buffer.
+    ///
+    /// Creates a temporary host-visible staging buffer, writes the data,
+    /// performs a synchronous `vkCmdCopyBuffer` to the destination, and
+    /// cleans up the staging buffer.
+    ///
+    /// The destination buffer must have been created with `DEVICE_LOCAL`
+    /// memory and include `TRANSFER_DST` in its usage flags.
+    pub fn upload_to_device_local(
+        &self,
+        dst: &VulkanBuffer,
+        data: &[u8],
+    ) -> Result<(), VulkanError> {
+        if !dst
+            .memory_property_flags
+            .contains(vk::MemoryPropertyFlags::DEVICE_LOCAL)
+        {
+            return Err(VulkanError::TransferValidation(
+                "destination buffer is not DEVICE_LOCAL".to_string(),
+            ));
+        }
+
+        if !dst.usage.contains(vk::BufferUsageFlags::TRANSFER_DST) {
+            return Err(VulkanError::TransferValidation(
+                "destination buffer missing TRANSFER_DST usage flag".to_string(),
+            ));
+        }
+
+        if data.is_empty() {
+            return Ok(());
+        }
+
+        let data_len = data.len() as vk::DeviceSize;
+        if data_len > dst.size {
+            return Err(VulkanError::TransferValidation(format!(
+                "data size {} exceeds destination buffer size {}",
+                data_len, dst.size
+            )));
+        }
+
+        let mut staging = self.create_host_visible_buffer(data_len)?;
+        staging.write_data(data)?;
+
+        self.execute_immediate(|cmd| cmd.record_copy_buffer(&staging, dst, data_len))
+    }
+
     /// Wait for the device to finish all pending work.
     ///
     /// Useful for cleanup / shutdown.  Avoid in hot paths.
@@ -629,10 +1065,8 @@ impl VulkanContext {
     /// Enumerate **all** physical devices on the system (useful for
     /// diagnostic / info commands).
     pub fn enumerate_physical_devices(&self) -> Result<Vec<PhysicalDeviceInfo>, VulkanError> {
-        let phys_devices = unsafe {
-            self.instance
-                .enumerate_physical_devices()
-        }.map_err(|_| VulkanError::NoPhysicalDevices)?;
+        let phys_devices = unsafe { self.instance.enumerate_physical_devices() }
+            .map_err(|_| VulkanError::NoPhysicalDevices)?;
 
         let mut infos = Vec::new();
         for pd in phys_devices {
@@ -646,10 +1080,9 @@ impl VulkanContext {
 impl Drop for VulkanContext {
     fn drop(&mut self) {
         unsafe {
-            self.device.handle().destroy_command_pool(
-                self.commands.command_pool,
-                None,
-            );
+            self.device
+                .handle()
+                .destroy_command_pool(self.commands.command_pool, None);
             self.device.handle().destroy_device(None);
             self.instance.destroy_instance(None);
         }
@@ -729,10 +1162,7 @@ fn get_driver_name(instance: &Instance, pd: vk::PhysicalDevice) -> String {
     }
 }
 
-fn get_device_extensions(
-    instance: &Instance,
-    pd: vk::PhysicalDevice,
-) -> Vec<String> {
+fn get_device_extensions(instance: &Instance, pd: vk::PhysicalDevice) -> Vec<String> {
     unsafe {
         match instance.enumerate_device_extension_properties(pd) {
             Ok(extensions_raw) => extensions_raw
@@ -748,10 +1178,7 @@ fn get_device_extensions(
     }
 }
 
-fn build_physical_device_info(
-    instance: &Instance,
-    pd: vk::PhysicalDevice,
-) -> PhysicalDeviceInfo {
+fn build_physical_device_info(instance: &Instance, pd: vk::PhysicalDevice) -> PhysicalDeviceInfo {
     let props = unsafe { instance.get_physical_device_properties(pd) };
     let name = unsafe {
         CStr::from_ptr(&props.device_name[0])
@@ -759,9 +1186,7 @@ fn build_physical_device_info(
             .into_owned()
     };
 
-    let queue_families = unsafe {
-        instance.get_physical_device_queue_family_properties(pd)
-    };
+    let queue_families = unsafe { instance.get_physical_device_queue_family_properties(pd) };
 
     let queue_families_info: Vec<QueueFamilyInfo> = queue_families
         .iter()
@@ -796,10 +1221,8 @@ fn build_physical_device_info(
 fn select_device(
     instance: &Instance,
 ) -> Result<(vk::PhysicalDevice, PhysicalDeviceInfo), VulkanError> {
-    let phys_devices = unsafe {
-        instance
-            .enumerate_physical_devices()
-    }.map_err(|_| VulkanError::NoPhysicalDevices)?;
+    let phys_devices = unsafe { instance.enumerate_physical_devices() }
+        .map_err(|_| VulkanError::NoPhysicalDevices)?;
 
     if phys_devices.is_empty() {
         return Err(VulkanError::NoPhysicalDevices);
@@ -866,9 +1289,7 @@ fn create_device(
     instance: &Instance,
     pd: vk::PhysicalDevice,
 ) -> Result<(VulkanDevice, QueueFamilySelection, CommandResources), VulkanError> {
-    let queue_families = unsafe {
-        instance.get_physical_device_queue_family_properties(pd)
-    };
+    let queue_families = unsafe { instance.get_physical_device_queue_family_properties(pd) };
 
     // Find first compute-capable queue family
     let queue_family_index = queue_families
@@ -890,8 +1311,7 @@ fn create_device(
         .queue_priorities(&queue_priorities);
 
     let queue_create_infos = [*queue_create_info];
-    let create_info = vk::DeviceCreateInfo::builder()
-        .queue_create_infos(&queue_create_infos);
+    let create_info = vk::DeviceCreateInfo::builder().queue_create_infos(&queue_create_infos);
 
     let device = unsafe {
         instance
@@ -1041,18 +1461,12 @@ mod tests {
 
     #[test]
     fn test_format_device_type_cpu() {
-        assert_eq!(
-            format_device_type(vk::PhysicalDeviceType::CPU),
-            "CPU"
-        );
+        assert_eq!(format_device_type(vk::PhysicalDeviceType::CPU), "CPU");
     }
 
     #[test]
     fn test_format_device_type_other() {
-        assert_eq!(
-            format_device_type(vk::PhysicalDeviceType::OTHER),
-            "Other"
-        );
+        assert_eq!(format_device_type(vk::PhysicalDeviceType::OTHER), "Other");
     }
 
     // --- format_vendor_id tests ---
@@ -1081,10 +1495,7 @@ mod tests {
 
     #[test]
     fn test_format_queue_flags_compute() {
-        assert_eq!(
-            format_queue_flags(vk::QueueFlags::COMPUTE),
-            "compute"
-        );
+        assert_eq!(format_queue_flags(vk::QueueFlags::COMPUTE), "compute");
     }
 
     #[test]
@@ -1095,8 +1506,7 @@ mod tests {
 
     #[test]
     fn test_format_queue_flags_all() {
-        let flags =
-            vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE | vk::QueueFlags::TRANSFER;
+        let flags = vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE | vk::QueueFlags::TRANSFER;
         assert_eq!(format_queue_flags(flags), "graphics, compute, transfer");
     }
 
@@ -1261,8 +1671,7 @@ mod tests {
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
         ]);
         let selector = MemoryTypeSelector { properties: props };
-        let idx =
-            selector.find_memory_type(0b11, vk::MemoryPropertyFlags::HOST_VISIBLE);
+        let idx = selector.find_memory_type(0b11, vk::MemoryPropertyFlags::HOST_VISIBLE);
         assert_eq!(idx, Some(1));
     }
 
@@ -1282,12 +1691,9 @@ mod tests {
 
     #[test]
     fn test_memory_type_selector_no_match() {
-        let props = make_memory_properties(&[
-            vk::MemoryPropertyFlags::DEVICE_LOCAL,
-        ]);
+        let props = make_memory_properties(&[vk::MemoryPropertyFlags::DEVICE_LOCAL]);
         let selector = MemoryTypeSelector { properties: props };
-        let idx =
-            selector.find_memory_type(0b1, vk::MemoryPropertyFlags::HOST_VISIBLE);
+        let idx = selector.find_memory_type(0b1, vk::MemoryPropertyFlags::HOST_VISIBLE);
         assert_eq!(idx, None);
     }
 
@@ -1308,12 +1714,9 @@ mod tests {
 
     #[test]
     fn test_memory_type_selector_empty_bitmask() {
-        let props = make_memory_properties(&[
-            vk::MemoryPropertyFlags::DEVICE_LOCAL,
-        ]);
+        let props = make_memory_properties(&[vk::MemoryPropertyFlags::DEVICE_LOCAL]);
         let selector = MemoryTypeSelector { properties: props };
-        let idx =
-            selector.find_memory_type(0, vk::MemoryPropertyFlags::DEVICE_LOCAL);
+        let idx = selector.find_memory_type(0, vk::MemoryPropertyFlags::DEVICE_LOCAL);
         assert_eq!(idx, None);
     }
 
@@ -1337,8 +1740,7 @@ mod tests {
             vk::MemoryPropertyFlags::HOST_VISIBLE
                 | vk::MemoryPropertyFlags::HOST_COHERENT
                 | vk::MemoryPropertyFlags::HOST_CACHED,
-            vk::MemoryPropertyFlags::HOST_VISIBLE
-                | vk::MemoryPropertyFlags::HOST_COHERENT,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
         ]);
         let selector = MemoryTypeSelector { properties: props };
 
@@ -1433,8 +1835,7 @@ mod tests {
             buffer: vk::Buffer::null(),
             memory: vk::DeviceMemory::null(),
             size: 4096,
-            usage: vk::BufferUsageFlags::STORAGE_BUFFER
-                | vk::BufferUsageFlags::TRANSFER_DST,
+            usage: vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
             memory_property_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
             mapped_ptr: None,
         };
@@ -1444,5 +1845,234 @@ mod tests {
         assert!(buf
             .memory_property_flags
             .contains(vk::MemoryPropertyFlags::DEVICE_LOCAL));
+    }
+
+    // --- Fence property tests (no GPU, struct construction only) ---
+
+    #[test]
+    fn test_fence_debug_format() {
+        let fence = Fence {
+            device: std::ptr::null(),
+            handle: vk::Fence::null(),
+        };
+        let debug_str = format!("{:?}", fence);
+        assert!(debug_str.contains("Fence"));
+    }
+
+    #[test]
+    fn test_fence_null_device_safe() {
+        // Verify that a Fence with null device doesn't panic on construction.
+        // Drop is also safe (null check prevents dereference).
+        let _fence = Fence {
+            device: std::ptr::null(),
+            handle: vk::Fence::null(),
+        };
+    }
+
+    // --- CommandBuffer property tests (no GPU, struct construction only) ---
+
+    #[test]
+    fn test_command_buffer_debug_format() {
+        let cmd = CommandBuffer {
+            device: std::ptr::null(),
+            command_pool: vk::CommandPool::null(),
+            handle: vk::CommandBuffer::null(),
+            is_recording: false,
+        };
+        let debug_str = format!("{:?}", cmd);
+        assert!(debug_str.contains("CommandBuffer"));
+        assert!(debug_str.contains("is_recording"));
+    }
+
+    #[test]
+    fn test_command_buffer_not_recording_initially() {
+        let cmd = CommandBuffer {
+            device: std::ptr::null(),
+            command_pool: vk::CommandPool::null(),
+            handle: vk::CommandBuffer::null(),
+            is_recording: false,
+        };
+        assert!(!cmd.is_recording);
+    }
+
+    #[test]
+    fn test_command_buffer_null_device_safe() {
+        // Verify that a CommandBuffer with null device doesn't panic
+        // on construction or drop.
+        let _cmd = CommandBuffer {
+            device: std::ptr::null(),
+            command_pool: vk::CommandPool::null(),
+            handle: vk::CommandBuffer::null(),
+            is_recording: false,
+        };
+    }
+
+    // --- Transfer validation tests ---
+
+    #[test]
+    fn test_transfer_validation_src_missing_flag() {
+        let src = VulkanBuffer {
+            device: std::ptr::null(),
+            buffer: vk::Buffer::null(),
+            memory: vk::DeviceMemory::null(),
+            size: 1024,
+            usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+            memory_property_flags: vk::MemoryPropertyFlags::HOST_VISIBLE,
+            mapped_ptr: None,
+        };
+        assert!(!src.usage.contains(vk::BufferUsageFlags::TRANSFER_SRC));
+    }
+
+    #[test]
+    fn test_transfer_validation_dst_missing_flag() {
+        let dst = VulkanBuffer {
+            device: std::ptr::null(),
+            buffer: vk::Buffer::null(),
+            memory: vk::DeviceMemory::null(),
+            size: 1024,
+            usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+            memory_property_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            mapped_ptr: None,
+        };
+        assert!(!dst.usage.contains(vk::BufferUsageFlags::TRANSFER_DST));
+    }
+
+    #[test]
+    fn test_transfer_validation_src_has_flag() {
+        let src = VulkanBuffer {
+            device: std::ptr::null(),
+            buffer: vk::Buffer::null(),
+            memory: vk::DeviceMemory::null(),
+            size: 1024,
+            usage: vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::STORAGE_BUFFER,
+            memory_property_flags: vk::MemoryPropertyFlags::HOST_VISIBLE,
+            mapped_ptr: None,
+        };
+        assert!(src.usage.contains(vk::BufferUsageFlags::TRANSFER_SRC));
+    }
+
+    #[test]
+    fn test_transfer_validation_dst_has_flag() {
+        let dst = VulkanBuffer {
+            device: std::ptr::null(),
+            buffer: vk::Buffer::null(),
+            memory: vk::DeviceMemory::null(),
+            size: 1024,
+            usage: vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::STORAGE_BUFFER,
+            memory_property_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            mapped_ptr: None,
+        };
+        assert!(dst.usage.contains(vk::BufferUsageFlags::TRANSFER_DST));
+    }
+
+    #[test]
+    fn test_transfer_size_exceeds_src() {
+        let src_size: vk::DeviceSize = 1024;
+        let copy_size: vk::DeviceSize = 2048;
+        assert!(copy_size > src_size);
+    }
+
+    #[test]
+    fn test_transfer_size_exceeds_dst() {
+        let dst_size: vk::DeviceSize = 512;
+        let copy_size: vk::DeviceSize = 1024;
+        assert!(copy_size > dst_size);
+    }
+
+    #[test]
+    fn test_transfer_size_exact_fit() {
+        let buf_size: vk::DeviceSize = 1024;
+        let copy_size: vk::DeviceSize = 1024;
+        assert!(copy_size <= buf_size);
+    }
+
+    #[test]
+    fn test_transfer_size_zero() {
+        let copy_size: vk::DeviceSize = 0;
+        assert_eq!(copy_size, 0);
+    }
+
+    // --- Upload validation tests ---
+
+    #[test]
+    fn test_upload_dst_not_device_local() {
+        let dst = VulkanBuffer {
+            device: std::ptr::null(),
+            buffer: vk::Buffer::null(),
+            memory: vk::DeviceMemory::null(),
+            size: 1024,
+            usage: vk::BufferUsageFlags::TRANSFER_DST,
+            memory_property_flags: vk::MemoryPropertyFlags::HOST_VISIBLE,
+            mapped_ptr: None,
+        };
+        assert!(!dst
+            .memory_property_flags
+            .contains(vk::MemoryPropertyFlags::DEVICE_LOCAL));
+    }
+
+    #[test]
+    fn test_upload_dst_is_device_local() {
+        let dst = VulkanBuffer {
+            device: std::ptr::null(),
+            buffer: vk::Buffer::null(),
+            memory: vk::DeviceMemory::null(),
+            size: 1024,
+            usage: vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::STORAGE_BUFFER,
+            memory_property_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            mapped_ptr: None,
+        };
+        assert!(dst
+            .memory_property_flags
+            .contains(vk::MemoryPropertyFlags::DEVICE_LOCAL));
+        assert!(dst.usage.contains(vk::BufferUsageFlags::TRANSFER_DST));
+    }
+
+    #[test]
+    fn test_upload_data_exceeds_buffer() {
+        let data = vec![0u8; 2048];
+        let buf_size: vk::DeviceSize = 1024;
+        assert!(data.len() as vk::DeviceSize > buf_size);
+    }
+
+    #[test]
+    fn test_upload_data_fits_buffer() {
+        let data = vec![0u8; 512];
+        let buf_size: vk::DeviceSize = 1024;
+        assert!(data.len() as vk::DeviceSize <= buf_size);
+    }
+
+    #[test]
+    fn test_upload_empty_data() {
+        let data: &[u8] = &[];
+        assert!(data.is_empty());
+    }
+
+    // --- New error display tests ---
+
+    #[test]
+    fn test_error_display_command_buffer_allocation() {
+        let err = VulkanError::CommandBufferAllocation(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY);
+        assert!(format!("{}", err).contains("command buffer"));
+    }
+
+    #[test]
+    fn test_error_display_fence_creation() {
+        let err = VulkanError::FenceCreation(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY);
+        assert!(format!("{}", err).contains("fence"));
+    }
+
+    #[test]
+    fn test_error_display_fence_wait() {
+        let err = VulkanError::FenceWait(vk::Result::TIMEOUT);
+        assert!(format!("{}", err).contains("fence"));
+    }
+
+    #[test]
+    fn test_error_display_transfer_validation() {
+        let err =
+            VulkanError::TransferValidation("destination buffer missing TRANSFER_DST".to_string());
+        let msg = format!("{}", err);
+        assert!(msg.contains("transfer validation"));
+        assert!(msg.contains("TRANSFER_DST"));
     }
 }

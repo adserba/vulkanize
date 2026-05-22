@@ -50,8 +50,8 @@ See also: `docs/current-status.md` (what is built), `docs/project-vision.md` (wh
 ### Phase 2.3: Buffers and pipelines (in progress)
 
 - [x] Buffer allocation helpers (device-local, host-visible staging) — Phase 2.3.1
+- [x] Staging upload path: command buffers, fences, transfer commands, synchronous upload — Phase 2.3.2
 - [ ] Compute pipeline from `.spv` module
-- [ ] Command buffer record → submit → wait cycle
 - [ ] Smoke test: dispatch a no-op kernel and verify completion
 
 ## Phase 3: First kernel — embedding lookup

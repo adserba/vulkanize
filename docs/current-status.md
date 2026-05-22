@@ -1,11 +1,12 @@
 # Current Status — Vulkanize
 
-> Last updated: Phase 2.3.1 complete.
+> Last updated: Phase 2.3.2 complete.
 
 ## Build and test status
 
 - `cargo build --release` — clean, 0 warnings
-- `cargo test` — 151 tests pass (106 gguf, 45 vulkan-backend)
+- `cargo test` — 173 tests pass (106 gguf, 67 vulkan-backend)
+- `cargo clippy --all-targets --all-features -- -D warnings` — clean
 - No integration tests or benchmarks yet
 
 ## Completed milestones
@@ -62,12 +63,36 @@
 - 18 new unit tests: memory type selection logic (8), error display (5), buffer struct properties (5)
 - `MemoryTypeSelector` cached in `VulkanContext` (constant per device, looked up once)
 
+### Phase 2.3.2: Staging upload path
+
+- `Fence` — RAII wrapper for `VkFence` with `create()`, `create_signaled()`, `wait()`, `reset()`, and correct `Drop` cleanup
+- `CommandBuffer` — RAII wrapper for `VkCommandBuffer` with:
+  - `begin_one_time_submit()` / `begin()` — start recording with appropriate flags
+  - `end()` — finalize recording
+  - `record_copy_buffer(src, dst, size)` — record `vkCmdCopyBuffer` with usage flag validation
+  - `submit_and_wait(queue, queue_family_index)` — submit, wait on fence, reset for reuse
+  - Automatic free-to-pool on `Drop`
+- `VulkanContext` command buffer management:
+  - `allocate_command_buffer()` — allocate primary command buffer from pool
+  - `execute_immediate(closure)` — allocate, record via closure, submit, wait, cleanup
+- Transfer/upload operations on `VulkanContext`:
+  - `copy_buffer(src, dst, size)` — full synchronous buffer-to-buffer copy with size validation
+  - `upload_to_device_local(dst, data)` — end-to-end CPU→GPU upload: staging buffer → map/write → copy → cleanup
+- Validation:
+  - `TRANSFER_SRC` / `TRANSFER_DST` usage flag checks on buffer copy
+  - `DEVICE_LOCAL` memory property check on upload target
+  - Size bounds checks (data size vs buffer size, copy size vs src/dst size)
+  - Empty data fast-path (no-op)
+- Error types: `CommandBufferAllocation`, `FenceCreation`, `FenceWait`, `TransferValidation(String)`
+- 22 new unit tests: Fence/CommandBuffer struct construction (5), error display (4), transfer validation logic (8), upload validation logic (5)
+- Synchronization model: fence-based, synchronous, single-queue. Designed for future async transfer queue extension.
+
 ## Current crate responsibilities
 
 | Crate | State | What it does |
 |---|---|---|
 | `vulkanize-gguf` | **Functional** | Parses GGUF v3 files, exposes typed metadata and tensor descriptors |
-| `vulkanize-vulkan-backend` | **Partial** | Full Vulkan init through buffer allocation. `VulkanContext` owns instance/device/queue/command pool/memory selector. `VulkanBuffer` provides RAII buffer+memory management with mapping support. No pipelines, dispatches, or command recording yet. |
+| `vulkanize-vulkan-backend` | **Partial** | Full Vulkan init through buffer allocation and staging upload. `VulkanContext` owns instance/device/queue/command pool/memory selector. `VulkanBuffer` provides RAII buffer+memory management with mapping support. `CommandBuffer` and `Fence` provide command recording, submission, and synchronous execution. `upload_to_device_local()` provides end-to-end CPU→GPU data upload. No pipelines, dispatches, or compute shaders yet. |
 | `vulkanize-runtime` | **Stub** | `pub fn init() {}` — placeholder |
 | `vulkanize-api` | **Stub** | `pub fn init() {}` — placeholder |
 | `vulkanize` (cli) | **Partial** | `inspect` works, `vulkan-info` works. `generate` and `serve` print "not yet implemented". |
@@ -83,11 +108,11 @@ vulkanize serve                     # stub — exits with "not yet implemented"
 
 ## What is NOT yet implemented
 
-- Staging upload path (vkMapMemory → memcpy → vkCmdCopyBuffer → unmap + free)
 - Compute pipeline creation from `.spv` modules
-- Command buffer recording, submission, or synchronization
-- Any shader code or SPIR-V binaries
-- Weight loading or memory mapping
+- Shader module loading or any SPIR-V binaries
+- Compute dispatch (`vkCmdDispatch`)
+- Weight loading from GGUF files (upload path exists but not integrated)
+- Descriptor sets and pipeline layouts
 - Forward pass, sampling, or generation
 - HTTP server / OpenAI API
 

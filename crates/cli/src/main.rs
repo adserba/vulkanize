@@ -41,77 +41,82 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Inspect { model } => {
-            match vulkanize_gguf::parse_gguf_full_from_path(&model) {
-                Ok((header, metadata, tensors)) => {
-                    match metadata.extract_model_arch() {
-                        Ok(arch) => {
-                            println!("Model:");
-                            if let Some(ref name) = arch.name {
-                                println!("  name:         {}", name);
-                            }
-                            println!("  architecture: {}", arch.architecture);
-                            if let Some(ref tokenizer) = arch.tokenizer_model {
-                                println!("  tokenizer:    {}", tokenizer);
-                            }
-                            println!("  blocks:       {}", arch.block_count);
-                            println!("  context:      {}", arch.context_length);
-                            println!("  embedding:    {}", arch.embedding_length);
-                            println!("  ffn:          {}", arch.feed_forward_length);
-                            println!("  heads:        {}", arch.attention_head_count);
-                            println!("  kv heads:     {}", arch.attention_head_count_kv.unwrap_or(arch.attention_head_count));
-                            if let Some(freq) = arch.rope_freq_base {
-                                println!("  rope base:    {}", freq);
-                            }
-                            if let Some(ft) = arch.file_type {
-                                println!("  file type:    {}", ft);
-                            }
-                            println!();
+        Commands::Inspect { model } => match vulkanize_gguf::parse_gguf_full_from_path(&model) {
+            Ok((header, metadata, tensors)) => {
+                match metadata.extract_model_arch() {
+                    Ok(arch) => {
+                        println!("Model:");
+                        if let Some(ref name) = arch.name {
+                            println!("  name:         {}", name);
                         }
-                        Err(e) => {
-                            eprintln!("warning: could not extract architecture: {}", e);
+                        println!("  architecture: {}", arch.architecture);
+                        if let Some(ref tokenizer) = arch.tokenizer_model {
+                            println!("  tokenizer:    {}", tokenizer);
                         }
+                        println!("  blocks:       {}", arch.block_count);
+                        println!("  context:      {}", arch.context_length);
+                        println!("  embedding:    {}", arch.embedding_length);
+                        println!("  ffn:          {}", arch.feed_forward_length);
+                        println!("  heads:        {}", arch.attention_head_count);
+                        println!(
+                            "  kv heads:     {}",
+                            arch.attention_head_count_kv
+                                .unwrap_or(arch.attention_head_count)
+                        );
+                        if let Some(freq) = arch.rope_freq_base {
+                            println!("  rope base:    {}", freq);
+                        }
+                        if let Some(ft) = arch.file_type {
+                            println!("  file type:    {}", ft);
+                        }
+                        println!();
                     }
-                    println!("GGUF Header:");
-                    println!("  version: {}", header.version);
-                    println!("  tensors: {}", header.tensor_count);
-                    println!("  metadata entries: {}", metadata.len());
-                    println!();
-                    if metadata.is_empty() {
-                        println!("(no metadata)");
-                    } else {
-                        println!("Metadata:");
-                        for entry in &metadata.entries {
-                            println!("  {} = {}", entry.key, entry.value);
-                        }
-                    }
-                    println!();
-                    if tensors.is_empty() {
-                        println!("(no tensors)");
-                    } else {
-                        println!("Tensors ({}):", tensors.len());
-                        for t in &tensors.descriptors {
-                            let shape = t
-                                .shape
-                                .iter()
-                                .rev()
-                                .map(|d| d.to_string())
-                                .collect::<Vec<_>>()
-                                .join("x");
-                            println!(
-                                "  {:<45} [{:>10}] {} @ offset {}",
-                                t.name, shape, t.dtype, t.offset
-                            );
-                        }
+                    Err(e) => {
+                        eprintln!("warning: could not extract architecture: {}", e);
                     }
                 }
-                Err(e) => {
-                    eprintln!("error: {}", e);
-                    process::exit(1);
+                println!("GGUF Header:");
+                println!("  version: {}", header.version);
+                println!("  tensors: {}", header.tensor_count);
+                println!("  metadata entries: {}", metadata.len());
+                println!();
+                if metadata.is_empty() {
+                    println!("(no metadata)");
+                } else {
+                    println!("Metadata:");
+                    for entry in &metadata.entries {
+                        println!("  {} = {}", entry.key, entry.value);
+                    }
+                }
+                println!();
+                if tensors.is_empty() {
+                    println!("(no tensors)");
+                } else {
+                    println!("Tensors ({}):", tensors.len());
+                    for t in &tensors.descriptors {
+                        let shape = t
+                            .shape
+                            .iter()
+                            .rev()
+                            .map(|d| d.to_string())
+                            .collect::<Vec<_>>()
+                            .join("x");
+                        println!(
+                            "  {:<45} [{:>10}] {} @ offset {}",
+                            t.name, shape, t.dtype, t.offset
+                        );
+                    }
                 }
             }
-        }
-        Commands::Generate { model: _, prompt: _ } => {
+            Err(e) => {
+                eprintln!("error: {}", e);
+                process::exit(1);
+            }
+        },
+        Commands::Generate {
+            model: _,
+            prompt: _,
+        } => {
             eprintln!("not yet implemented");
             process::exit(1);
         }
@@ -135,10 +140,20 @@ fn main() {
                     // Selected physical device
                     println!("Selected GPU:");
                     println!("  name:           {}", info.name);
-                    println!("  type:           {}", vulkanize_vulkan_backend::format_device_type(info.device_type));
-                    println!("  vendor:         {} (0x{:04X})", vulkanize_vulkan_backend::format_vendor_id(info.vendor_id), info.vendor_id);
+                    println!(
+                        "  type:           {}",
+                        vulkanize_vulkan_backend::format_device_type(info.device_type)
+                    );
+                    println!(
+                        "  vendor:         {} (0x{:04X})",
+                        vulkanize_vulkan_backend::format_vendor_id(info.vendor_id),
+                        info.vendor_id
+                    );
                     println!("  device id:      0x{:04X}", info.device_id);
-                    println!("  api version:    {}", vulkanize_vulkan_backend::format_version(info.api_version));
+                    println!(
+                        "  api version:    {}",
+                        vulkanize_vulkan_backend::format_version(info.api_version)
+                    );
                     println!("  driver version: {}", info.driver_version);
                     println!("  driver name:    {}", info.driver_name);
                     println!();
@@ -146,7 +161,10 @@ fn main() {
                     // Logical device
                     println!("Logical device:");
                     println!("  created:        yes");
-                    println!("  compute queue:  {:?} (family {}, index 0)", device.compute_queue, qfamily.queue_family_index);
+                    println!(
+                        "  compute queue:  {:?} (family {}, index 0)",
+                        device.compute_queue, qfamily.queue_family_index
+                    );
                     println!();
 
                     // Queue families

@@ -29,7 +29,10 @@ pub enum GgufError {
 impl fmt::Display for GgufError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            GgufError::FileTooShort { required, available } => write!(
+            GgufError::FileTooShort {
+                required,
+                available,
+            } => write!(
                 f,
                 "file too short: need {} bytes, got {}",
                 required, available
@@ -430,28 +433,39 @@ fn get_string(entries: &[MetadataEntry], key: &str) -> Option<String> {
 
 /// Extract a required u32 value, returning MissingMetadata if absent or wrong type.
 fn require_u32(entries: &[MetadataEntry], key: &str) -> Result<u32, MissingMetadata> {
-    get_u32(entries, key).ok_or_else(|| MissingMetadata { key: key.to_string() })
+    get_u32(entries, key).ok_or_else(|| MissingMetadata {
+        key: key.to_string(),
+    })
 }
 
 /// Extract a required u64 value, returning MissingMetadata if absent or wrong type.
 fn require_u64(entries: &[MetadataEntry], key: &str) -> Result<u64, MissingMetadata> {
-    get_u64(entries, key).ok_or_else(|| MissingMetadata { key: key.to_string() })
+    get_u64(entries, key).ok_or_else(|| MissingMetadata {
+        key: key.to_string(),
+    })
 }
 
 /// Extract a required f32 value, returning MissingMetadata if absent or wrong type.
 #[allow(dead_code)]
 fn require_f32(entries: &[MetadataEntry], key: &str) -> Result<f32, MissingMetadata> {
-    get_f32(entries, key).ok_or_else(|| MissingMetadata { key: key.to_string() })
+    get_f32(entries, key).ok_or_else(|| MissingMetadata {
+        key: key.to_string(),
+    })
 }
 
 /// Extract a required String value, returning MissingMetadata if absent or wrong type.
 fn require_string(entries: &[MetadataEntry], key: &str) -> Result<String, MissingMetadata> {
-    get_string(entries, key).ok_or_else(|| MissingMetadata { key: key.to_string() })
+    get_string(entries, key).ok_or_else(|| MissingMetadata {
+        key: key.to_string(),
+    })
 }
 
 /// Extract an optional String value, returning Ok(None) if absent or wrong type.
 #[allow(dead_code)]
-fn optional_string(entries: &[MetadataEntry], key: &str) -> Result<Option<String>, MissingMetadata> {
+fn optional_string(
+    entries: &[MetadataEntry],
+    key: &str,
+) -> Result<Option<String>, MissingMetadata> {
     Ok(get_string(entries, key))
 }
 
@@ -488,18 +502,30 @@ fn arch_f32(entries: &[MetadataEntry], arch: &str, field: &str) -> Result<f32, M
 }
 
 /// Extract an optional u32 with architecture-specific prefix.
-fn arch_optional_u32(entries: &[MetadataEntry], arch: &str, field: &str) -> Result<Option<u32>, MissingMetadata> {
+fn arch_optional_u32(
+    entries: &[MetadataEntry],
+    arch: &str,
+    field: &str,
+) -> Result<Option<u32>, MissingMetadata> {
     optional_u32(entries, &format!("{}.{}", arch, field))
 }
 
 /// Extract an optional u64 with architecture-specific prefix.
 #[allow(dead_code)]
-fn arch_optional_u64(entries: &[MetadataEntry], arch: &str, field: &str) -> Result<Option<u64>, MissingMetadata> {
+fn arch_optional_u64(
+    entries: &[MetadataEntry],
+    arch: &str,
+    field: &str,
+) -> Result<Option<u64>, MissingMetadata> {
     optional_u64(entries, &format!("{}.{}", arch, field))
 }
 
 /// Extract an optional f32 with architecture-specific prefix.
-fn arch_optional_f32(entries: &[MetadataEntry], arch: &str, field: &str) -> Result<Option<f32>, MissingMetadata> {
+fn arch_optional_f32(
+    entries: &[MetadataEntry],
+    arch: &str,
+    field: &str,
+) -> Result<Option<f32>, MissingMetadata> {
     optional_f32(entries, &format!("{}.{}", arch, field))
 }
 
@@ -552,7 +578,11 @@ impl GgufMetadata {
             embedding_length: arch_u32(entries, &architecture, "embedding_length")?,
             feed_forward_length: arch_u32(entries, &architecture, "feed_forward_length")?,
             attention_head_count: arch_u32(entries, &architecture, "attention.head_count")?,
-            attention_head_count_kv: arch_optional_u32(entries, &architecture, "attention.head_count_kv")?,
+            attention_head_count_kv: arch_optional_u32(
+                entries,
+                &architecture,
+                "attention.head_count_kv",
+            )?,
             rope_freq_base: arch_optional_f32(entries, &architecture, "rope.freq_base")?,
             file_type: get_u32(entries, "general.file_type"),
         })
@@ -760,10 +790,7 @@ fn parse_value(bytes: &[u8], offset: usize) -> Result<(MetadataValue, usize), Gg
 fn parse_metadata_entry(bytes: &[u8], offset: usize) -> Result<(MetadataEntry, usize), GgufError> {
     let (key, key_consumed) = parse_string(bytes, offset)?;
     let (value, val_consumed) = parse_value(bytes, offset + key_consumed)?;
-    Ok((
-        MetadataEntry { key, value },
-        key_consumed + val_consumed,
-    ))
+    Ok((MetadataEntry { key, value }, key_consumed + val_consumed))
 }
 
 /// Parse all GGUF metadata entries after the header.
@@ -894,9 +921,7 @@ fn compute_metadata_end_offset(bytes: &[u8], kv_count: u64) -> Result<usize, Ggu
         let val_offset = offset;
 
         match GgufValueType::from_u32(type_id) {
-            Some(GgufValueType::Uint8)
-            | Some(GgufValueType::Int8)
-            | Some(GgufValueType::Bool) => {
+            Some(GgufValueType::Uint8) | Some(GgufValueType::Int8) | Some(GgufValueType::Bool) => {
                 offset += 1;
             }
             Some(GgufValueType::Uint16) | Some(GgufValueType::Int16) => {
@@ -948,9 +973,7 @@ fn parse_array_skip(bytes: &[u8], offset: usize) -> Result<(u32, usize), GgufErr
 
     for _ in 0..len {
         match GgufValueType::from_u32(type_id) {
-            Some(GgufValueType::Uint8)
-            | Some(GgufValueType::Int8)
-            | Some(GgufValueType::Bool) => {
+            Some(GgufValueType::Uint8) | Some(GgufValueType::Int8) | Some(GgufValueType::Bool) => {
                 pos += 1;
             }
             Some(GgufValueType::Uint16) | Some(GgufValueType::Int16) => {
@@ -1013,9 +1036,7 @@ pub fn parse_header(bytes: &[u8]) -> Result<GgufHeader, GgufError> {
 }
 
 /// Parse a GGUF header from a file on disk.
-pub fn parse_header_from_path<P: AsRef<std::path::Path>>(
-    path: P,
-) -> Result<GgufHeader, GgufError> {
+pub fn parse_header_from_path<P: AsRef<std::path::Path>>(path: P) -> Result<GgufHeader, GgufError> {
     let bytes = std::fs::read(path)?;
     parse_header(&bytes)
 }
@@ -1037,6 +1058,7 @@ pub fn parse_gguf_full_from_path<P: AsRef<std::path::Path>>(
 }
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
 
@@ -1107,7 +1129,10 @@ mod tests {
     fn test_file_too_short_exact() {
         let bytes = vec![0u8; HEADER_SIZE - 1];
         match parse_header(&bytes) {
-            Err(GgufError::FileTooShort { required, available }) => {
+            Err(GgufError::FileTooShort {
+                required,
+                available,
+            }) => {
                 assert_eq!(required, HEADER_SIZE);
                 assert_eq!(available, HEADER_SIZE - 1);
             }
@@ -1118,7 +1143,10 @@ mod tests {
     #[test]
     fn test_file_too_short_empty() {
         match parse_header(&[]) {
-            Err(GgufError::FileTooShort { required, available }) => {
+            Err(GgufError::FileTooShort {
+                required,
+                available,
+            }) => {
                 assert_eq!(required, HEADER_SIZE);
                 assert_eq!(available, 0);
             }
@@ -1268,8 +1296,14 @@ mod tests {
         assert_eq!(format!("{}", MetadataValue::Int16(-32768)), "-32768");
         assert_eq!(format!("{}", MetadataValue::Uint32(1_000_000)), "1000000");
         assert_eq!(format!("{}", MetadataValue::Int32(-1_000_000)), "-1000000");
-        assert_eq!(format!("{}", MetadataValue::Uint64(u64::MAX)), format!("{}", u64::MAX));
-        assert_eq!(format!("{}", MetadataValue::Int64(i64::MIN)), format!("{}", i64::MIN));
+        assert_eq!(
+            format!("{}", MetadataValue::Uint64(u64::MAX)),
+            format!("{}", u64::MAX)
+        );
+        assert_eq!(
+            format!("{}", MetadataValue::Int64(i64::MIN)),
+            format!("{}", i64::MIN)
+        );
     }
 
     #[test]
@@ -1290,10 +1324,7 @@ mod tests {
             format!("{}", MetadataValue::String("hello".to_string())),
             "\"hello\""
         );
-        assert_eq!(
-            format!("{}", MetadataValue::String("".to_string())),
-            "\"\""
-        );
+        assert_eq!(format!("{}", MetadataValue::String("".to_string())), "\"\"");
     }
 
     // --- String parsing tests ---
@@ -1562,22 +1593,10 @@ mod tests {
             metadata.entries[0].value,
             MetadataValue::String("MyModel".to_string())
         );
-        assert_eq!(
-            metadata.entries[2].value,
-            MetadataValue::Int32(42)
-        );
-        assert_eq!(
-            metadata.entries[6].value,
-            MetadataValue::Float32(10000.0)
-        );
-        assert_eq!(
-            metadata.entries[7].value,
-            MetadataValue::Uint8(2)
-        );
-        assert_eq!(
-            metadata.entries[8].value,
-            MetadataValue::Uint8(255)
-        );
+        assert_eq!(metadata.entries[2].value, MetadataValue::Int32(42));
+        assert_eq!(metadata.entries[6].value, MetadataValue::Float32(10000.0));
+        assert_eq!(metadata.entries[7].value, MetadataValue::Uint8(2));
+        assert_eq!(metadata.entries[8].value, MetadataValue::Uint8(255));
     }
 
     #[test]
@@ -1615,10 +1634,7 @@ mod tests {
             MetadataValue::Uint64(12345678901234)
         );
         assert_eq!(metadata.entries[10].value, MetadataValue::Int64(-999));
-        assert_eq!(
-            metadata.entries[11].value,
-            MetadataValue::Float64(1.23e10)
-        );
+        assert_eq!(metadata.entries[11].value, MetadataValue::Float64(1.23e10));
     }
 
     #[test]
@@ -1717,7 +1733,11 @@ mod tests {
             ("llama.feed_forward_length", 5, &11008u32.to_le_bytes()),
             ("llama.rope.freq_base", 6, &f32::to_le_bytes(10000.0)),
             ("llama.rope.dimension_count", 5, &128u32.to_le_bytes()),
-            ("llama.attention.layer_norm_rms_epsilon", 6, &f32::to_le_bytes(1e-5)),
+            (
+                "llama.attention.layer_norm_rms_epsilon",
+                6,
+                &f32::to_le_bytes(1e-5),
+            ),
             ("llama.pooling_type", 5, &0u32.to_le_bytes()),
             ("llama.expert_count", 5, &0u32.to_le_bytes()),
         ]);
@@ -2092,7 +2112,10 @@ mod tests {
         assert_eq!(header.metadata_kv_count, 3);
         assert_eq!(metadata.len(), 3);
         assert_eq!(tensors.len(), 3);
-        assert_eq!(metadata.entries[0].value, MetadataValue::String("llama".to_string()));
+        assert_eq!(
+            metadata.entries[0].value,
+            MetadataValue::String("llama".to_string())
+        );
         assert_eq!(tensors.descriptors[0].name, "token_embd.weight");
         assert_eq!(tensors.descriptors[1].dtype, GgufTensorType::F32);
         assert_eq!(tensors.descriptors[2].offset, 20000);
@@ -2100,10 +2123,7 @@ mod tests {
 
     #[test]
     fn test_parse_gguf_full_tensors_only() {
-        let bytes = make_gguf_full(
-            &[],
-            &[("solo.tensor", 1, &[100], 0, 500)],
-        );
+        let bytes = make_gguf_full(&[], &[("solo.tensor", 1, &[100], 0, 500)]);
         let (header, metadata, tensors) = parse_gguf_full(&bytes).unwrap();
         assert_eq!(header.metadata_kv_count, 0);
         assert_eq!(header.tensor_count, 1);
@@ -2114,10 +2134,7 @@ mod tests {
 
     #[test]
     fn test_parse_gguf_full_metadata_only() {
-        let bytes = make_gguf_full(
-            &[("key", 8, &encode_string("value"))],
-            &[],
-        );
+        let bytes = make_gguf_full(&[("key", 8, &encode_string("value"))], &[]);
         let (header, metadata, tensors) = parse_gguf_full(&bytes).unwrap();
         assert_eq!(header.metadata_kv_count, 1);
         assert_eq!(header.tensor_count, 0);
@@ -2147,7 +2164,9 @@ mod tests {
 
     #[test]
     fn test_tensors_len_and_is_empty() {
-        let t = GgufTensors { descriptors: vec![] };
+        let t = GgufTensors {
+            descriptors: vec![],
+        };
         assert!(t.is_empty());
         assert_eq!(t.len(), 0);
 
@@ -2298,9 +2317,7 @@ mod tests {
 
     #[test]
     fn test_extract_arch_missing_architecture() {
-        let bytes = make_gguf(&[
-            ("llama.block_count", 5, &32u32.to_le_bytes()),
-        ]);
+        let bytes = make_gguf(&[("llama.block_count", 5, &32u32.to_le_bytes())]);
         let (_, metadata) = parse_gguf(&bytes).unwrap();
         let err = metadata.extract_model_arch().unwrap_err();
         assert_eq!(err.key, "general.architecture");
