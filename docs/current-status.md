@@ -1,11 +1,11 @@
 # Current Status — Vulkanize
 
-> Last updated: Phase 3.2 GPU embedding lookup smoke test complete. Phase 3 runtime orchestration next.
+> Last updated: GGUF parser real-file compatibility fix complete. Phase 3 runtime orchestration next.
 
 ## Build and test status
 
 - `cargo build --release` — clean, 0 warnings
-- `cargo test` — 312 unit tests pass (154 gguf, 137 vulkan-backend, 21 runtime)
+- `cargo test` — 316 unit tests pass (158 gguf, 137 vulkan-backend, 21 runtime)
 - `cargo test --test smoke_no_op -- --ignored` — passes (end-to-end GPU dispatch with explicit barriers)
 - `cargo test --test embedding_lookup -- --ignored` — passes (GPU embedding lookup, synthetic F32, validated on AMD Radeon AI PRO R9700 / RADV)
 - `cargo clippy --all-targets --all-features -- -D warnings` — clean
@@ -26,8 +26,10 @@
 - `TensorDescriptor` with name, dims, shape, dtype, offset, `element_count()`
 - `GgufMetadata` with `extract_model_arch()` — extracts architecture, block count, context length, embedding/FFN dimensions, head counts, GQA, RoPE base, file type
 - `parse_gguf_full_from_path()` — reads file, returns `(GgufHeader, GgufMetadata, GgufTensors)`
-- Array-value skipping in metadata region (for tensor offset calculation)
-- 106 unit tests with synthetic GGUF byte arrays
+- Metadata arrays are tolerated and skipped safely by element type/length, including tokenizer token/merge arrays
+- Tensor descriptor offsets are tracked as GGUF-relative offsets plus aligned tensor data-section start; `read_tensor_bytes()` resolves absolute reads as `data_start + offset`
+- Safer integer extraction for u32-like architecture metadata rejects negative and out-of-range values
+- 158 unit tests with synthetic GGUF byte arrays
 - `vulkanize inspect model.gguf` prints model architecture, metadata, tensor list
 
 ### Phase 2.1: Vulkan context skeleton
@@ -220,7 +222,7 @@
 
 | Crate | State | What it does |
 |---|---|---|
-| `vulkanize-gguf` | **Functional** | Parses GGUF v3 files, exposes typed metadata and tensor descriptors. Helper methods: `type_block_size()`, `block_size()`, `tensor_byte_size()`. Lookup: `find_tensor()`, `find_token_embedding()`. I/O: `read_tensor_bytes()`. Error: `TensorLookupError`. |
+| `vulkanize-gguf` | **Functional** | Parses GGUF v3 files, exposes typed scalar metadata and tensor descriptors. Metadata arrays are consumed safely without materializing tokenizer payloads. Tensor offsets are resolved relative to the aligned data section. Helper methods: `type_block_size()`, `block_size()`, `tensor_byte_size()`. Lookup: `find_tensor()`, `find_token_embedding()`. I/O: `read_tensor_bytes()`. Error: `TensorLookupError`. |
 | `vulkanize-vulkan-backend` | **Functional** | Full Vulkan init through compute dispatch. `VulkanContext` owns instance/device/queue/command pool/memory selector. `VulkanBuffer` provides RAII buffer+memory management. `CommandBuffer` and `Fence` provide command recording, submission, and sync. `ShaderModule` loads SPIR-V. `ComputePipeline` manages pipeline+layout with push constant support. `DescriptorSetLayout`/`DescriptorPool`/`DescriptorSet` manage descriptor lifecycle with multi-buffer layouts. `DescriptorBinding` configures individual bindings. `upload_to_device_local()` and `readback_buffer_data()` provide full CPU↔GPU data movement. `CommandBuffer::dispatch()` executes compute shaders. `CommandBuffer::push_constants()` pushes per-dispatch data. `CommandBuffer::record_barrier_transfer_to_compute()` and `record_barrier_compute_to_transfer()` provide explicit memory synchronization. |
 | `vulkanize-runtime` | **Partial** | `embedding` module with CPU reference: `embedding_lookup_f32()`, `f16_to_f32_bytes()`, `compare_f32()` for correctness validation |
 | `vulkanize-api` | **Stub** | `pub fn init() {}` — placeholder |

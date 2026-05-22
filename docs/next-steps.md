@@ -18,7 +18,7 @@ Then work on the next roadmap item. After completing it, update `docs/roadmap.md
 
 ## Phase 3: First kernel — embedding lookup
 
-Phase 2.3 and Phase 3.0 are complete. The backend can allocate buffers, upload data, load shaders, create pipelines with descriptor sets and push constants, dispatch compute work with explicit memory barriers, and read back results. The smoke test proves end-to-end GPU execution. Phase 3.2 validates the embedding lookup shader with synthetic F32 data on real hardware.
+Phase 2.3 and Phase 3.0 are complete. The backend can allocate buffers, upload data, load shaders, create pipelines with descriptor sets and push constants, dispatch compute work with explicit memory barriers, and read back results. The smoke test proves end-to-end GPU execution. Phase 3.2 validates the embedding lookup shader with synthetic F32 data on real hardware. The GGUF parser now tolerates real tokenizer metadata arrays and resolves tensor offsets relative to the aligned tensor data section.
 
 ### What is done (Phase 3.0 + 3.2)
 
@@ -26,6 +26,7 @@ Phase 2.3 and Phase 3.0 are complete. The backend can allocate buffers, upload d
 - Backend: multi-buffer descriptors, push constants, explicit transfer/compute barriers
 - CPU reference: `embedding_lookup_f32()`, `compare_f32()` in `runtime::embedding`
 - GPU smoke test: synthetic F32 embeddings, GPU output matches CPU reference within 1e-5
+- GGUF parser prerequisite: metadata arrays are safely skipped and `read_tensor_bytes()` uses `data_start + tensor.offset`
 
 ### What remains
 

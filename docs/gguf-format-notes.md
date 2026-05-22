@@ -97,16 +97,16 @@ Not all models have `output.weight` — some tie weights to the embedding matrix
 
 1. Memory-map the file with `std::fs::File` + `memmap2` (deferred; currently uses `std::fs::read`)
 2. Read header 4 fields from offset 0 — **implemented**
-3. Walk KV pairs, build `GgufMetadata` — **implemented** (scalars only; arrays skipped in offset tracking)
+3. Walk KV pairs, build `GgufMetadata` — **implemented** (scalars parsed; arrays consumed and recorded by element type/length without materializing tokenizer payloads)
 4. Walk tensor headers, build `Vec<TensorDescriptor>` — **implemented**
-5. Tensor data is accessed via file offset + mmap pointer — never copy to CPU heap
+5. Tensor data is accessed via aligned data-section start + tensor-relative offset; current helper uses `File` + seek/read, mmap deferred
 6. Pass tensor descriptors + mmap handle to runtime for GPU buffer creation
 
 ## Gotchas
 
 - **Padding**: tensor data region starts at a 32-byte aligned offset after all headers. The header's last byte position + pad → tensor data start.
 - **No stride in GGUF v3**: GGUF tensor headers contain shape but NOT stride. Compute byte size from `element_count * type_block_size`. (Stride was a GGML v2 concept, not carried forward to GGUF.)
-- **Offset is from file start**: tensor `offset` field is absolute file offset, not relative to data region.
+- **Tensor offsets are relative**: GGUF v3 tensor `offset` fields are relative to the 32-byte-aligned tensor data section, not absolute file offsets. Vulkanize stores the raw relative `offset` plus `data_start` and resolves absolute reads as `data_start + offset`.
 - **String format**: GGUF strings are UTF-8 with a u64 length prefix (no null terminator).
 - **Shape order**: shape dimensions are stored big-to-small (e.g., `[rows, cols]` for a matrix).
 - **Big-endian on v2**: GGUF v2 used big-endian for some fields; v3+ is little-endian always.

@@ -3,6 +3,7 @@ use std::io::{Read, Seek};
 
 const GGUF_MAGIC: [u8; 4] = *b"GGUF";
 const HEADER_SIZE: usize = 24;
+const GGUF_ALIGNMENT: usize = 32;
 const SUPPORTED_VERSIONS: [u32; 1] = [3];
 
 pub const GGUF_MAGIC_STR: &str = "GGUF";
@@ -153,6 +154,10 @@ pub enum MetadataValue {
     Float64(f64),
     Bool(bool),
     String(String),
+    Array {
+        element_type: GgufValueType,
+        len: u64,
+    },
 }
 
 impl fmt::Display for MetadataValue {
@@ -170,6 +175,9 @@ impl fmt::Display for MetadataValue {
             MetadataValue::Float64(v) => write!(f, "{}", v),
             MetadataValue::Bool(v) => write!(f, "{}", v),
             MetadataValue::String(v) => write!(f, "\"{}\"", v),
+            MetadataValue::Array { element_type, len } => {
+                write!(f, "array<{}>[{}]", element_type, len)
+            }
         }
     }
 }
@@ -444,13 +452,21 @@ pub struct TensorDescriptor {
     pub n_dims: u32,
     pub shape: Vec<u64>,
     pub dtype: GgufTensorType,
+    /// Offset stored in the GGUF tensor descriptor, relative to `data_start`.
     pub offset: u64,
+    /// Absolute file offset where the aligned tensor data section starts.
+    pub data_start: u64,
 }
 
 impl TensorDescriptor {
     /// Total number of elements in the tensor (product of all dimensions).
     pub fn element_count(&self) -> u64 {
         self.shape.iter().product()
+    }
+
+    /// Absolute byte offset of this tensor's raw data in the GGUF file.
+    pub fn absolute_offset(&self) -> Option<u64> {
+        self.data_start.checked_add(self.offset)
     }
 }
 
@@ -633,7 +649,7 @@ impl std::error::Error for TensorLookupError {}
 
 /// Read raw tensor bytes from a GGUF file.
 ///
-/// Seeks to the tensor's file offset, computes the byte size from the
+/// Seeks to `desc.data_start + desc.offset`, computes the byte size from the
 /// tensor's shape and dtype, and reads exactly that many bytes.
 ///
 /// The `gguf` crate stays parsing/I/O only — this function performs no
@@ -665,9 +681,18 @@ pub fn read_tensor_bytes(
             tensor: desc.name.clone(),
         })?;
 
-    file.seek(std::io::SeekFrom::Start(desc.offset))
+    let absolute_offset = desc
+        .absolute_offset()
+        .ok_or_else(|| TensorLookupError::Overflow {
+            tensor: desc.name.clone(),
+        })?;
+
+    file.seek(std::io::SeekFrom::Start(absolute_offset))
         .map_err(|e| TensorLookupError::NotFound {
-            patterns: vec![format!("io error seeking to offset {}: {}", desc.offset, e)],
+            patterns: vec![format!(
+                "io error seeking to offset {}: {}",
+                absolute_offset, e
+            )],
         })?;
 
     let mut buf = vec![0u8; byte_size_usize];
@@ -675,7 +700,7 @@ pub fn read_tensor_bytes(
         .map_err(|e| TensorLookupError::NotFound {
             patterns: vec![format!(
                 "io error reading tensor '{}' at offset {}: {}",
-                desc.name, desc.offset, e
+                desc.name, absolute_offset, e
             )],
         })?;
 
@@ -701,16 +726,18 @@ fn find_entry<'a>(entries: &'a [MetadataEntry], key: &str) -> Option<&'a Metadat
     entries.iter().find(|e| e.key == key)
 }
 
-/// Extract a u32 value from metadata. Accepts any integer type source.
+/// Extract a u32 value from metadata. Accepts integer sources that fit in u32.
 fn get_u32(entries: &[MetadataEntry], key: &str) -> Option<u32> {
     let entry = find_entry(entries, key)?;
     match &entry.value {
         MetadataValue::Uint8(v) => Some(*v as u32),
         MetadataValue::Uint16(v) => Some(*v as u32),
         MetadataValue::Uint32(v) => Some(*v),
-        MetadataValue::Int32(v) => Some(*v as u32),
-        MetadataValue::Uint64(v) => Some(*v as u32),
-        MetadataValue::Int64(v) => Some(*v as u32),
+        MetadataValue::Int8(v) => u32::try_from(*v).ok(),
+        MetadataValue::Int16(v) => u32::try_from(*v).ok(),
+        MetadataValue::Int32(v) => u32::try_from(*v).ok(),
+        MetadataValue::Uint64(v) => u32::try_from(*v).ok(),
+        MetadataValue::Int64(v) => u32::try_from(*v).ok(),
         _ => None,
     }
 }
@@ -728,7 +755,7 @@ fn get_i32(entries: &[MetadataEntry], key: &str) -> Option<i32> {
     }
 }
 
-/// Extract a u64 value from metadata. Accepts any integer type source.
+/// Extract a u64 value from metadata. Accepts integer sources that fit in u64.
 fn get_u64(entries: &[MetadataEntry], key: &str) -> Option<u64> {
     let entry = find_entry(entries, key)?;
     match &entry.value {
@@ -736,8 +763,10 @@ fn get_u64(entries: &[MetadataEntry], key: &str) -> Option<u64> {
         MetadataValue::Uint16(v) => Some(*v as u64),
         MetadataValue::Uint32(v) => Some(*v as u64),
         MetadataValue::Uint64(v) => Some(*v),
-        MetadataValue::Int32(v) => Some(*v as u64),
-        MetadataValue::Int64(v) => Some(*v as u64),
+        MetadataValue::Int8(v) => u64::try_from(*v).ok(),
+        MetadataValue::Int16(v) => u64::try_from(*v).ok(),
+        MetadataValue::Int32(v) => u64::try_from(*v).ok(),
+        MetadataValue::Int64(v) => u64::try_from(*v).ok(),
         _ => None,
     }
 }
@@ -769,6 +798,7 @@ fn require_u32(entries: &[MetadataEntry], key: &str) -> Result<u32, MissingMetad
 }
 
 /// Extract a required u64 value, returning MissingMetadata if absent or wrong type.
+#[allow(dead_code)]
 fn require_u64(entries: &[MetadataEntry], key: &str) -> Result<u64, MissingMetadata> {
     get_u64(entries, key).ok_or_else(|| MissingMetadata {
         key: key.to_string(),
@@ -821,6 +851,7 @@ fn arch_u32(entries: &[MetadataEntry], arch: &str, field: &str) -> Result<u32, M
 }
 
 /// Extract a required u64 with architecture-specific prefix.
+#[allow(dead_code)]
 fn arch_u64(entries: &[MetadataEntry], arch: &str, field: &str) -> Result<u64, MissingMetadata> {
     require_u64(entries, &format!("{}.{}", arch, field))
 }
@@ -904,7 +935,7 @@ impl GgufMetadata {
             name: get_string(entries, "general.name"),
             tokenizer_model: get_string(entries, "tokenizer.ggml.model"),
             block_count: arch_u32(entries, &architecture, "block_count")?,
-            context_length: arch_u64(entries, &architecture, "context_length")? as u32,
+            context_length: arch_u32(entries, &architecture, "context_length")?,
             embedding_length: arch_u32(entries, &architecture, "embedding_length")?,
             feed_forward_length: arch_u32(entries, &architecture, "feed_forward_length")?,
             attention_head_count: arch_u32(entries, &architecture, "attention.head_count")?,
@@ -966,7 +997,8 @@ fn parse_value(bytes: &[u8], offset: usize) -> Result<(MetadataValue, usize), Gg
     ]);
     let val_offset = offset + 4;
 
-    let value_type = GgufValueType::from_u32(type_id).unwrap_or(GgufValueType::Array);
+    let value_type =
+        GgufValueType::from_u32(type_id).ok_or(GgufError::UnsupportedValueType { type_id })?;
 
     match value_type {
         GgufValueType::Uint8 => {
@@ -1111,7 +1143,10 @@ fn parse_value(bytes: &[u8], offset: usize) -> Result<(MetadataValue, usize), Gg
             let (s, consumed) = parse_string(bytes, val_offset)?;
             Ok((MetadataValue::String(s), 4 + consumed))
         }
-        GgufValueType::Array => Err(GgufError::UnsupportedValueType { type_id }),
+        GgufValueType::Array => {
+            let (element_type, len, consumed) = parse_array_skip(bytes, val_offset)?;
+            Ok((MetadataValue::Array { element_type, len }, 4 + consumed))
+        }
     }
 }
 
@@ -1145,7 +1180,7 @@ pub fn parse_metadata(bytes: &[u8], kv_count: u64) -> Result<GgufMetadata, GgufE
 ///   n_dims: u32
 ///   shape: [u64; n_dims] (big-to-small order)
 ///   dtype: u32 (GGML type ID)
-///   offset: u64 (absolute file offset)
+///   offset: u64 (relative to the aligned tensor data section)
 fn parse_tensor_descriptor(
     bytes: &[u8],
     offset: usize,
@@ -1193,9 +1228,19 @@ fn parse_tensor_descriptor(
             shape,
             dtype,
             offset: tensor_offset,
+            data_start: 0,
         },
         pos - offset,
     ))
+}
+
+fn align_offset(offset: usize, alignment: usize) -> Option<usize> {
+    let remainder = offset % alignment;
+    if remainder == 0 {
+        Some(offset)
+    } else {
+        offset.checked_add(alignment - remainder)
+    }
 }
 
 /// Parse all GGUF tensor descriptors after the metadata region.
@@ -1211,6 +1256,14 @@ pub fn parse_tensors(
         let (desc, consumed) = parse_tensor_descriptor(bytes, offset)?;
         descriptors.push(desc);
         offset += consumed;
+    }
+
+    let data_start = align_offset(offset, GGUF_ALIGNMENT).ok_or(GgufError::TruncatedTensor {
+        context: "tensor data alignment",
+    })? as u64;
+
+    for desc in &mut descriptors {
+        desc.data_start = data_start;
     }
 
     Ok(GgufTensors { descriptors })
@@ -1272,7 +1325,7 @@ fn compute_metadata_end_offset(bytes: &[u8], kv_count: u64) -> Result<usize, Ggu
                 offset += consumed;
             }
             Some(GgufValueType::Array) => {
-                let (_array_type_id, consumed) = parse_array_skip(bytes, val_offset)?;
+                let (_element_type, _len, consumed) = parse_array_skip(bytes, val_offset)?;
                 offset += consumed;
             }
             _ => {
@@ -1283,14 +1336,19 @@ fn compute_metadata_end_offset(bytes: &[u8], kv_count: u64) -> Result<usize, Ggu
     Ok(offset)
 }
 
-/// Skip over a GGUF array value, returning the element type ID and bytes consumed.
-fn parse_array_skip(bytes: &[u8], offset: usize) -> Result<(u32, usize), GgufError> {
+/// Skip over a GGUF array value, returning element type, length, and bytes consumed.
+fn parse_array_skip(bytes: &[u8], offset: usize) -> Result<(GgufValueType, u64, usize), GgufError> {
     if offset + 4 > bytes.len() {
         return Err(GgufError::TruncatedMetadata {
             context: "array type",
         });
     }
     let type_id = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+    let element_type =
+        GgufValueType::from_u32(type_id).ok_or(GgufError::UnsupportedValueType { type_id })?;
+    if element_type == GgufValueType::Array {
+        return Err(GgufError::UnsupportedValueType { type_id });
+    }
     let mut pos = offset + 4;
 
     if pos + 8 > bytes.len() {
@@ -1298,38 +1356,52 @@ fn parse_array_skip(bytes: &[u8], offset: usize) -> Result<(u32, usize), GgufErr
             context: "array length",
         });
     }
-    let len = u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap()) as usize;
+    let len = u64::from_le_bytes(bytes[pos..pos + 8].try_into().unwrap());
     pos += 8;
 
     for _ in 0..len {
-        match GgufValueType::from_u32(type_id) {
-            Some(GgufValueType::Uint8) | Some(GgufValueType::Int8) | Some(GgufValueType::Bool) => {
+        match element_type {
+            GgufValueType::Uint8 | GgufValueType::Int8 | GgufValueType::Bool => {
+                if pos + 1 > bytes.len() {
+                    return Err(GgufError::TruncatedMetadata {
+                        context: "array element",
+                    });
+                }
                 pos += 1;
             }
-            Some(GgufValueType::Uint16) | Some(GgufValueType::Int16) => {
+            GgufValueType::Uint16 | GgufValueType::Int16 => {
+                if pos + 2 > bytes.len() {
+                    return Err(GgufError::TruncatedMetadata {
+                        context: "array element",
+                    });
+                }
                 pos += 2;
             }
-            Some(GgufValueType::Uint32)
-            | Some(GgufValueType::Int32)
-            | Some(GgufValueType::Float32) => {
+            GgufValueType::Uint32 | GgufValueType::Int32 | GgufValueType::Float32 => {
+                if pos + 4 > bytes.len() {
+                    return Err(GgufError::TruncatedMetadata {
+                        context: "array element",
+                    });
+                }
                 pos += 4;
             }
-            Some(GgufValueType::Uint64)
-            | Some(GgufValueType::Int64)
-            | Some(GgufValueType::Float64) => {
+            GgufValueType::Uint64 | GgufValueType::Int64 | GgufValueType::Float64 => {
+                if pos + 8 > bytes.len() {
+                    return Err(GgufError::TruncatedMetadata {
+                        context: "array element",
+                    });
+                }
                 pos += 8;
             }
-            Some(GgufValueType::String) => {
+            GgufValueType::String => {
                 let (_s, consumed) = parse_string(bytes, pos)?;
                 pos += consumed;
             }
-            _ => {
-                return Err(GgufError::UnsupportedValueType { type_id });
-            }
+            GgufValueType::Array => return Err(GgufError::UnsupportedValueType { type_id }),
         }
     }
 
-    Ok((type_id, pos - offset))
+    Ok((element_type, len, pos - offset))
 }
 
 /// Parse a GGUF header from a byte slice (at least 28 bytes).
@@ -1419,6 +1491,14 @@ mod tests {
     fn make_entry(key: &str, type_id: u32, data: &[u8]) -> Vec<u8> {
         let mut buf = encode_string(key);
         buf.extend_from_slice(&make_value(type_id, data));
+        buf
+    }
+
+    fn encode_array(element_type: GgufValueType, elements: &[u8], len: u64) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(12 + elements.len());
+        buf.extend_from_slice(&element_type.to_u32().to_le_bytes());
+        buf.extend_from_slice(&len.to_le_bytes());
+        buf.extend_from_slice(elements);
         buf
     }
 
@@ -1835,14 +1915,18 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_value_array_unsupported() {
-        let bytes = make_value(9, &[]);
-        match parse_value(&bytes, 0) {
-            Err(GgufError::UnsupportedValueType { type_id }) => {
-                assert_eq!(type_id, 9);
+    fn test_parse_value_array_skipped() {
+        let array = encode_array(GgufValueType::String, &encode_string("tok"), 1);
+        let bytes = make_value(9, &array);
+        let (value, consumed) = parse_value(&bytes, 0).unwrap();
+        assert_eq!(
+            value,
+            MetadataValue::Array {
+                element_type: GgufValueType::String,
+                len: 1,
             }
-            other => panic!("expected UnsupportedValueType, got {:?}", other),
-        }
+        );
+        assert_eq!(consumed, 4 + array.len());
     }
 
     #[test]
@@ -1992,13 +2076,27 @@ mod tests {
 
     #[test]
     fn test_parse_metadata_with_array_type() {
-        let bytes = make_gguf(&[("arr", 9, &[])]);
-        match parse_gguf(&bytes) {
-            Err(GgufError::UnsupportedValueType { type_id }) => {
-                assert_eq!(type_id, 9);
+        let mut token_bytes = Vec::new();
+        token_bytes.extend_from_slice(&encode_string("<unk>"));
+        token_bytes.extend_from_slice(&encode_string("hello"));
+        let token_array = encode_array(GgufValueType::String, &token_bytes, 2);
+        let bytes = make_gguf(&[
+            ("general.architecture", 8, &encode_string("llama")),
+            ("tokenizer.ggml.tokens", 9, &token_array),
+            ("llama.block_count", 5, &2u32.to_le_bytes()),
+        ]);
+        let (_, metadata) = parse_gguf(&bytes).unwrap();
+        assert_eq!(metadata.len(), 3);
+        assert_eq!(metadata.entries[0].key, "general.architecture");
+        assert_eq!(metadata.entries[1].key, "tokenizer.ggml.tokens");
+        assert_eq!(
+            metadata.entries[1].value,
+            MetadataValue::Array {
+                element_type: GgufValueType::String,
+                len: 2,
             }
-            other => panic!("expected UnsupportedValueType, got {:?}", other),
-        }
+        );
+        assert_eq!(metadata.entries[2].key, "llama.block_count");
     }
 
     // --- Error display tests for new variants ---
@@ -2157,6 +2255,11 @@ mod tests {
             buf.extend_from_slice(&encode_tensor(name, *n_dims, shape, *type_id, *offset));
         }
         buf
+    }
+
+    fn pad_to_alignment(buf: &mut Vec<u8>, alignment: usize) {
+        let aligned = align_offset(buf.len(), alignment).unwrap();
+        buf.resize(aligned, 0);
     }
 
     // --- Tensor descriptor parsing tests ---
@@ -2382,6 +2485,7 @@ mod tests {
             shape: vec![],
             dtype: GgufTensorType::F32,
             offset: 0,
+            data_start: 0,
         };
         assert_eq!(desc.element_count(), 1);
     }
@@ -2394,6 +2498,7 @@ mod tests {
             shape: vec![128],
             dtype: GgufTensorType::F32,
             offset: 0,
+            data_start: 0,
         };
         assert_eq!(desc.element_count(), 128);
     }
@@ -2406,6 +2511,7 @@ mod tests {
             shape: vec![4096, 32000],
             dtype: GgufTensorType::F16,
             offset: 0,
+            data_start: 0,
         };
         assert_eq!(desc.element_count(), 4096 * 32000);
     }
@@ -2449,6 +2555,28 @@ mod tests {
         assert_eq!(tensors.descriptors[0].name, "token_embd.weight");
         assert_eq!(tensors.descriptors[1].dtype, GgufTensorType::F32);
         assert_eq!(tensors.descriptors[2].offset, 20000);
+        assert_eq!(
+            tensors.descriptors[2].absolute_offset(),
+            Some(tensors.descriptors[2].data_start + 20000)
+        );
+    }
+
+    #[test]
+    fn test_parse_gguf_full_sets_tensor_data_start() {
+        let mut bytes = make_gguf_full(
+            &[("meta", 8, &encode_string("value"))],
+            &[("t0", 1, &[4], 0, 16)],
+        );
+        let unaligned_len = bytes.len();
+        let expected_data_start = align_offset(unaligned_len, GGUF_ALIGNMENT).unwrap() as u64;
+        pad_to_alignment(&mut bytes, GGUF_ALIGNMENT);
+        bytes.extend_from_slice(&[0xAA; 64]);
+
+        let (_, _, tensors) = parse_gguf_full(&bytes).unwrap();
+        let desc = &tensors.descriptors[0];
+        assert_eq!(desc.offset, 16);
+        assert_eq!(desc.data_start, expected_data_start);
+        assert_eq!(desc.absolute_offset(), Some(expected_data_start + 16));
     }
 
     #[test]
@@ -2507,6 +2635,7 @@ mod tests {
                 shape: vec![10],
                 dtype: GgufTensorType::F32,
                 offset: 0,
+                data_start: 0,
             }],
         };
         assert!(!t.is_empty());
@@ -2759,6 +2888,40 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_arch_rejects_negative_u32_metadata() {
+        let bytes = make_gguf(&[
+            ("general.architecture", 8, &encode_string("llama")),
+            ("llama.block_count", 5, &(-1i32).to_le_bytes()),
+            ("llama.context_length", 11, &4096u64.to_le_bytes()),
+            ("llama.embedding_length", 5, &4096u32.to_le_bytes()),
+            ("llama.feed_forward_length", 5, &11008u32.to_le_bytes()),
+            ("llama.attention.head_count", 5, &32u32.to_le_bytes()),
+        ]);
+        let (_, metadata) = parse_gguf(&bytes).unwrap();
+        let err = metadata.extract_model_arch().unwrap_err();
+        assert_eq!(err.key, "llama.block_count");
+    }
+
+    #[test]
+    fn test_extract_arch_rejects_out_of_range_u32_metadata() {
+        let bytes = make_gguf(&[
+            ("general.architecture", 8, &encode_string("llama")),
+            ("llama.block_count", 5, &32u32.to_le_bytes()),
+            (
+                "llama.context_length",
+                10,
+                &(u32::MAX as u64 + 1).to_le_bytes(),
+            ),
+            ("llama.embedding_length", 5, &4096u32.to_le_bytes()),
+            ("llama.feed_forward_length", 5, &11008u32.to_le_bytes()),
+            ("llama.attention.head_count", 5, &32u32.to_le_bytes()),
+        ]);
+        let (_, metadata) = parse_gguf(&bytes).unwrap();
+        let err = metadata.extract_model_arch().unwrap_err();
+        assert_eq!(err.key, "llama.context_length");
+    }
+
+    #[test]
     fn test_extract_arch_float64_rope() {
         let bytes = make_gguf(&[
             ("general.architecture", 8, &encode_string("llama")),
@@ -2989,6 +3152,7 @@ mod tests {
                     shape: vec![4096, 32000],
                     dtype: GgufTensorType::F16,
                     offset: 0,
+                    data_start: 0,
                 },
                 TensorDescriptor {
                     name: "output.weight".to_string(),
@@ -2996,6 +3160,7 @@ mod tests {
                     shape: vec![32000, 4096],
                     dtype: GgufTensorType::F32,
                     offset: 1000,
+                    data_start: 0,
                 },
             ],
         };
@@ -3039,6 +3204,7 @@ mod tests {
                 shape: vec![4096, 32000],
                 dtype: GgufTensorType::F16,
                 offset: 0,
+                data_start: 0,
             }],
         };
         let arch = make_test_arch(4096);
@@ -3056,6 +3222,7 @@ mod tests {
                 shape: vec![32000, 4096],
                 dtype: GgufTensorType::F16,
                 offset: 0,
+                data_start: 0,
             }],
         };
         let arch = make_test_arch(4096);
@@ -3072,6 +3239,7 @@ mod tests {
                 shape: vec![1],
                 dtype: GgufTensorType::F32,
                 offset: 0,
+                data_start: 0,
             }],
         };
         let arch = make_test_arch(1);
@@ -3091,6 +3259,7 @@ mod tests {
                 shape: vec![32000, 4096],
                 dtype: GgufTensorType::F32,
                 offset: 0,
+                data_start: 0,
             }],
         };
         let arch = make_test_arch(4096);
@@ -3111,6 +3280,7 @@ mod tests {
                 shape: vec![4096],
                 dtype: GgufTensorType::F32,
                 offset: 0,
+                data_start: 0,
             }],
         };
         let arch = make_test_arch(4096);
@@ -3136,6 +3306,7 @@ mod tests {
                 shape: vec![2048, 32000],
                 dtype: GgufTensorType::F32,
                 offset: 0,
+                data_start: 0,
             }],
         };
         let arch = make_test_arch(4096);
@@ -3157,6 +3328,7 @@ mod tests {
                     shape: vec![4096, 32000],
                     dtype: GgufTensorType::F16,
                     offset: 0,
+                    data_start: 0,
                 },
                 TensorDescriptor {
                     name: "b_embd.weight".to_string(),
@@ -3164,6 +3336,7 @@ mod tests {
                     shape: vec![4096, 32000],
                     dtype: GgufTensorType::F16,
                     offset: 1000,
+                    data_start: 0,
                 },
             ],
         };
@@ -3186,6 +3359,7 @@ mod tests {
                     shape: vec![4096, 32000],
                     dtype: GgufTensorType::F16,
                     offset: 0,
+                    data_start: 0,
                 },
                 TensorDescriptor {
                     name: "other_embd.weight".to_string(),
@@ -3193,6 +3367,7 @@ mod tests {
                     shape: vec![4096, 32000],
                     dtype: GgufTensorType::F16,
                     offset: 1000,
+                    data_start: 0,
                 },
             ],
         };
@@ -3260,6 +3435,7 @@ mod tests {
             shape: vec![4],
             dtype: GgufTensorType::F32,
             offset: 128,
+            data_start: 0,
         };
 
         let tmp = std::env::temp_dir().join("vulkanize_test_tensor.bin");
@@ -3278,6 +3454,33 @@ mod tests {
     }
 
     #[test]
+    fn test_read_tensor_bytes_uses_relative_tensor_offset() {
+        let tensor_bytes = [0x10, 0x20, 0x30, 0x40];
+        let mut file_data = make_gguf_full(&[], &[("test", 1, &[4], 24, 4)]);
+        let data_start = align_offset(file_data.len(), GGUF_ALIGNMENT).unwrap();
+        pad_to_alignment(&mut file_data, GGUF_ALIGNMENT);
+        file_data.extend_from_slice(&[0xFF; 4]);
+        file_data.extend_from_slice(&tensor_bytes);
+
+        let (_, _, tensors) = parse_gguf_full(&file_data).unwrap();
+        let desc = &tensors.descriptors[0];
+        assert_eq!(desc.offset, 4);
+        assert_eq!(desc.data_start, data_start as u64);
+
+        let tmp = std::env::temp_dir().join(format!(
+            "vulkanize_test_relative_{}.gguf",
+            std::process::id()
+        ));
+        std::fs::write(&tmp, &file_data).unwrap();
+        let mut file = std::fs::File::open(&tmp).unwrap();
+
+        let result = read_tensor_bytes(&mut file, desc).unwrap();
+        assert_eq!(result, tensor_bytes);
+
+        std::fs::remove_file(&tmp).unwrap();
+    }
+
+    #[test]
     fn test_read_tensor_bytes_f16() {
         let mut file_data = vec![0u8; 128];
         // Write known F16 bytes at offset 64: [0x3c00, 0x3e00] (1.0, 2.0 in F16)
@@ -3290,6 +3493,7 @@ mod tests {
             shape: vec![2],
             dtype: GgufTensorType::F16,
             offset: 64,
+            data_start: 0,
         };
 
         let tmp = std::env::temp_dir().join("vulkanize_test_f16.bin");
@@ -3311,6 +3515,7 @@ mod tests {
             shape: vec![32],
             dtype: GgufTensorType::Q4_1_F16,
             offset: 0,
+            data_start: 0,
         };
 
         let tmp = std::env::temp_dir().join("vulkanize_test_unsup.bin");
@@ -3338,6 +3543,7 @@ mod tests {
             shape: vec![4],
             dtype: GgufTensorType::F32,
             offset: 4,
+            data_start: 0,
         };
 
         let tmp = std::env::temp_dir().join("vulkanize_test_trunc.bin");
@@ -3363,6 +3569,7 @@ mod tests {
             shape: vec![32],
             dtype: GgufTensorType::Q4_0,
             offset: 128,
+            data_start: 0,
         };
 
         let tmp = std::env::temp_dir().join("vulkanize_test_q4.bin");
