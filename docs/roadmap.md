@@ -47,21 +47,28 @@ See also: `docs/current-status.md` (what is built), `docs/project-vision.md` (wh
 - [x] `vulkanize vulkan-info` confirms logical device, queue family, command pool
 - [x] Unit tests for QueueFamilySelection, QueueFamilyInfo, error display
 
-### Phase 2.3: Buffers and pipelines (in progress)
+### Phase 2.3: Buffers and pipelines (done)
 
 - [x] Buffer allocation helpers (device-local, host-visible staging) — Phase 2.3.1
 - [x] Staging upload path: command buffers, fences, transfer commands, synchronous upload — Phase 2.3.2
 - [x] Shader module loading: `ShaderModule` RAII wrapper, SPIR-V byte/file loading, pre-validation — Phase 2.3.3
 - [x] Compute pipeline from shader module — Phase 2.3.4
-- [ ] Smoke test: dispatch a no-op kernel and verify completion
+- [x] Descriptor sets: `DescriptorSetLayout`, `DescriptorPool`, `DescriptorSet` — Phase 2.3.5
+- [x] Compute dispatch: `CommandBuffer::bind_compute_pipeline`, `bind_descriptor_sets`, `dispatch` — Phase 2.3.5
+- [x] Buffer readback: `VulkanContext::readback_buffer_data` — Phase 2.3.5
+- [x] Smoke test: dispatch a no-op kernel and verify completion — Phase 2.3.6
 
 ## Phase 3: First kernel — embedding lookup
 
-- [ ] Write `embedding_lookup.comp.glsl` shader
-- [ ] Compile to SPIR-V, embed or ship as `.spv`
-- [ ] Runtime: memory-map GGUF weights, create device buffers
+- [ ] Write `embedding_lookup.comp.glsl` shader (F32, then F16)
+- [ ] Compile to SPIR-V, ship as `.spv` in `shaders/`
+- [ ] Backend: extend descriptor support for multi-buffer layouts (input + output bindings)
+- [ ] Backend: add push constant support to pipeline layouts
+- [ ] Runtime: parse GGUF, identify embedding tensor, upload to device-local buffer
+- [ ] Runtime: allocate output buffer, create descriptor set with weight + output bindings
 - [ ] Dispatch embedding lookup for a single token
-- [ ] Read back and verify against CPU reference
+- [ ] Read back and verify against CPU reference computation
+- [ ] Integration test: end-to-end embedding lookup with real GGUF model
 
 ## Phase 4: Transformer block
 
