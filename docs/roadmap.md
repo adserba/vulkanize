@@ -52,7 +52,7 @@ See also: `docs/current-status.md` (what is built), `docs/project-vision.md` (wh
 - [x] Buffer allocation helpers (device-local, host-visible staging) — Phase 2.3.1
 - [x] Staging upload path: command buffers, fences, transfer commands, synchronous upload — Phase 2.3.2
 - [x] Shader module loading: `ShaderModule` RAII wrapper, SPIR-V byte/file loading, pre-validation — Phase 2.3.3
-- [ ] Compute pipeline from shader module
+- [x] Compute pipeline from shader module — Phase 2.3.4
 - [ ] Smoke test: dispatch a no-op kernel and verify completion
 
 ## Phase 3: First kernel — embedding lookup

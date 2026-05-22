@@ -59,6 +59,12 @@ pub enum VulkanError {
     InvalidSpvBytes(String),
     /// Failed to load a SPIR-V binary file.
     SpvLoadingError(String),
+    /// Failed to create a pipeline layout.
+    PipelineLayoutCreation(vk::Result),
+    /// Failed to create a compute pipeline.
+    ComputePipelineCreation(vk::Result),
+    /// Entry point name contains a null byte or is otherwise invalid for CString.
+    InvalidEntryPoint(String),
 }
 
 impl fmt::Display for VulkanError {
@@ -113,6 +119,15 @@ impl fmt::Display for VulkanError {
             }
             VulkanError::SpvLoadingError(msg) => {
                 write!(f, "SPIR-V loading error: {}", msg)
+            }
+            VulkanError::PipelineLayoutCreation(res) => {
+                write!(f, "pipeline layout creation failed: {:?}", res)
+            }
+            VulkanError::ComputePipelineCreation(res) => {
+                write!(f, "compute pipeline creation failed: {:?}", res)
+            }
+            VulkanError::InvalidEntryPoint(msg) => {
+                write!(f, "invalid entry point name: {}", msg)
             }
         }
     }
@@ -905,6 +920,155 @@ pub fn load_spv_file(path: &std::path::Path) -> Result<Vec<u8>, VulkanError> {
 }
 
 // ---------------------------------------------------------------------------
+// ComputePipeline — owns VkPipeline + VkPipelineLayout
+// ---------------------------------------------------------------------------
+
+/// A Vulkan compute pipeline with its associated pipeline layout.
+///
+/// This type owns both the `VkPipeline` and `VkPipelineLayout` handles
+/// and ensures correct cleanup order on drop: destroy pipeline first,
+/// then destroy pipeline layout.
+///
+/// The pipeline is created from a `ShaderModule` and an entry point name.
+/// The pipeline layout starts minimal (no descriptor sets, no push
+/// constants) and is designed to be extended when kernels require
+/// buffer bindings.
+///
+/// # Lifecycle
+///
+/// 1. Create a `ShaderModule` from SPIR-V bytes
+/// 2. Create via `ComputePipeline::new()` or
+///    `VulkanContext::create_compute_pipeline()`
+/// 3. Bind in a command buffer with `vkCmdBindPipeline`
+/// 4. `Drop` destroys pipeline, then pipeline layout
+///
+/// The pipeline holds a raw pointer to the `ash::Device` for cleanup.
+/// Callers must ensure the device outlives all pipelines created from
+/// it. `VulkanContext` guarantees this by owning both.
+pub struct ComputePipeline {
+    device: *const ash::Device,
+    /// The Vulkan compute pipeline handle.
+    pipeline: vk::Pipeline,
+    /// The Vulkan pipeline layout handle.
+    layout: vk::PipelineLayout,
+}
+
+impl fmt::Debug for ComputePipeline {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ComputePipeline")
+            .field("pipeline", &self.pipeline)
+            .field("layout", &self.layout)
+            .finish()
+    }
+}
+
+impl ComputePipeline {
+    /// Returns the Vulkan pipeline handle for use in `vkCmdBindPipeline`.
+    pub fn handle(&self) -> vk::Pipeline {
+        self.pipeline
+    }
+
+    /// Returns the Vulkan pipeline layout handle for use in descriptor
+    /// set bindings and future pipeline cache operations.
+    pub fn layout(&self) -> vk::PipelineLayout {
+        self.layout
+    }
+
+    /// Create a compute pipeline from a shader module and entry point name.
+    ///
+    /// Creates a minimal pipeline layout with no descriptor set layouts
+    /// and no push constants. This is sufficient for shaders that don't
+    /// yet bind buffers. When descriptor sets are needed, the layout
+    /// creation will be extended.
+    ///
+    /// # Errors
+    ///
+    /// Returns `VulkanError::InvalidEntryPoint` if the entry point name
+    /// contains a null byte. Returns pipeline creation errors for Vulkan
+    /// API failures.
+    pub fn new(
+        device: &ash::Device,
+        shader_module: &ShaderModule,
+        entry_point: &str,
+    ) -> Result<Self, VulkanError> {
+        let entry_point_cstr = CString::new(entry_point).map_err(|e| {
+            VulkanError::InvalidEntryPoint(format!(
+                "entry point name contains invalid bytes: {}",
+                e
+            ))
+        })?;
+
+        // Create minimal pipeline layout — no descriptor sets, no push constants.
+        // This is valid Vulkan and sufficient for shaders that don't bind resources.
+        // When descriptor sets are needed, extend this with set_layouts.
+        let layout_create_info = vk::PipelineLayoutCreateInfo::builder();
+
+        let layout = unsafe {
+            device
+                .create_pipeline_layout(&layout_create_info, None)
+                .map_err(VulkanError::PipelineLayoutCreation)?
+        };
+
+        let stage_info = vk::PipelineShaderStageCreateInfo::builder()
+            .stage(vk::ShaderStageFlags::COMPUTE)
+            .module(shader_module.handle())
+            .name(entry_point_cstr.as_c_str())
+            .build();
+
+        let pipeline_create_info = vk::ComputePipelineCreateInfo::builder()
+            .stage(stage_info)
+            .layout(layout)
+            .build();
+
+        // create_compute_pipelines returns (Vec<Pipeline>, Vec<Result>) — the
+        // outer Result is for allocation failures, the inner per-pipeline
+        // Results indicate individual compilation outcomes.
+        // create_compute_pipelines in ash returns Result<Vec<Pipeline>, (Vec<Pipeline>, vk::Result)>.
+        // The error variant carries the partial results when creation is incomplete.
+        let pipelines = unsafe {
+            match device.create_compute_pipelines(
+                vk::PipelineCache::null(),
+                &[pipeline_create_info],
+                None,
+            ) {
+                Ok(pipes) => pipes,
+                Err((_, vk_result)) => {
+                    device.destroy_pipeline_layout(layout, None);
+                    return Err(VulkanError::ComputePipelineCreation(vk_result));
+                }
+            }
+        };
+
+        let pipeline = pipelines
+            .into_iter()
+            .next()
+            .ok_or(VulkanError::ComputePipelineCreation(
+                vk::Result::ERROR_UNKNOWN,
+            ))?;
+
+        Ok(Self {
+            device: device as *const ash::Device,
+            pipeline,
+            layout,
+        })
+    }
+}
+
+impl Drop for ComputePipeline {
+    fn drop(&mut self) {
+        if self.device.is_null() {
+            return;
+        }
+        let device = unsafe { &*self.device };
+        // Destroy pipeline first, then layout (correct Vulkan destruction order).
+        unsafe {
+            device.destroy_pipeline(self.pipeline, None);
+            device.destroy_pipeline_layout(self.layout, None);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // VulkanContext — owns instance + logical device + queues
 // ---------------------------------------------------------------------------
 
@@ -1218,6 +1382,18 @@ impl VulkanContext {
     ) -> Result<ShaderModule, VulkanError> {
         let bytes = load_spv_file(path)?;
         self.create_shader_module_from_spv_bytes(&bytes)
+    }
+
+    /// Create a compute pipeline from a shader module and entry point.
+    ///
+    /// Creates a minimal pipeline layout with no descriptor sets and
+    /// no push constants. Extend when kernels require buffer bindings.
+    pub fn create_compute_pipeline(
+        &self,
+        shader_module: &ShaderModule,
+        entry_point: &str,
+    ) -> Result<ComputePipeline, VulkanError> {
+        ComputePipeline::new(self.device.handle(), shader_module, entry_point)
     }
 
     /// Wait for the device to finish all pending work.
@@ -2354,5 +2530,128 @@ mod tests {
         let msg = format!("{}", err);
         assert!(msg.contains("SPIR-V loading"));
         assert!(msg.contains("file not found"));
+    }
+
+    // --- ComputePipeline tests ---
+
+    #[test]
+    fn test_compute_pipeline_debug_format() {
+        let pipeline = ComputePipeline {
+            device: std::ptr::null(),
+            pipeline: vk::Pipeline::null(),
+            layout: vk::PipelineLayout::null(),
+        };
+        let debug_str = format!("{:?}", pipeline);
+        assert!(debug_str.contains("ComputePipeline"));
+        assert!(debug_str.contains("pipeline"));
+        assert!(debug_str.contains("layout"));
+    }
+
+    #[test]
+    fn test_compute_pipeline_null_device_safe() {
+        // Verify that a ComputePipeline with null device doesn't panic
+        // on construction or drop.
+        let _pipeline = ComputePipeline {
+            device: std::ptr::null(),
+            pipeline: vk::Pipeline::null(),
+            layout: vk::PipelineLayout::null(),
+        };
+    }
+
+    #[test]
+    fn test_compute_pipeline_handle_accessor() {
+        let pipeline = ComputePipeline {
+            device: std::ptr::null(),
+            pipeline: vk::Pipeline::null(),
+            layout: vk::PipelineLayout::null(),
+        };
+        assert_eq!(pipeline.handle(), vk::Pipeline::null());
+    }
+
+    #[test]
+    fn test_compute_pipeline_layout_accessor() {
+        let pipeline = ComputePipeline {
+            device: std::ptr::null(),
+            pipeline: vk::Pipeline::null(),
+            layout: vk::PipelineLayout::null(),
+        };
+        assert_eq!(pipeline.layout(), vk::PipelineLayout::null());
+    }
+
+    #[test]
+    fn test_compute_pipeline_drop_order() {
+        // Verify that Drop compiles and runs without panic for null handles.
+        // The actual destruction order (pipeline first, then layout) is
+        // enforced in the Drop implementation.
+        let pipeline = ComputePipeline {
+            device: std::ptr::null(),
+            pipeline: vk::Pipeline::null(),
+            layout: vk::PipelineLayout::null(),
+        };
+        drop(pipeline);
+    }
+
+    // --- Entry point CString validation tests ---
+
+    #[test]
+    fn test_entry_point_valid_main() {
+        let result = CString::new("main");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_entry_point_valid_underscored() {
+        let result = CString::new("embedding_lookup");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_entry_point_valid_with_digits() {
+        let result = CString::new("matmul_8x8");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_entry_point_valid_with_double_underscore() {
+        // Common in SPIR-V: __attribute or vendor-specific names
+        let result = CString::new("__rope_apply");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_entry_point_rejects_null_byte() {
+        // CString::new rejects strings containing null bytes
+        let result = CString::new("main\0extra");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_entry_point_rejects_embedded_null() {
+        let result = CString::new("foo\0bar");
+        assert!(result.is_err());
+    }
+
+    // --- Pipeline error display tests ---
+
+    #[test]
+    fn test_error_display_pipeline_layout_creation() {
+        let err = VulkanError::PipelineLayoutCreation(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY);
+        assert!(format!("{}", err).contains("pipeline layout"));
+    }
+
+    #[test]
+    fn test_error_display_compute_pipeline_creation() {
+        let err = VulkanError::ComputePipelineCreation(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY);
+        assert!(format!("{}", err).contains("compute pipeline"));
+    }
+
+    #[test]
+    fn test_error_display_invalid_entry_point() {
+        let err = VulkanError::InvalidEntryPoint(
+            "entry point name contains invalid bytes: unexpected null byte".to_string(),
+        );
+        let msg = format!("{}", err);
+        assert!(msg.contains("invalid entry point"));
+        assert!(msg.contains("null byte"));
     }
 }

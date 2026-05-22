@@ -1,11 +1,11 @@
 # Current Status — Vulkanize
 
-> Last updated: Phase 2.3.3 complete.
+> Last updated: Phase 2.3.4 complete.
 
 ## Build and test status
 
 - `cargo build --release` — clean, 0 warnings
-- `cargo test` — 186 tests pass (106 gguf, 80 vulkan-backend)
+- `cargo test` — 200 tests pass (106 gguf, 94 vulkan-backend)
 - `cargo clippy --all-targets --all-features -- -D warnings` — clean
 - No integration tests or benchmarks yet
 
@@ -81,6 +81,21 @@
 - 13 new unit tests: struct construction (5), word count / byte-to-word logic (4), error display (4)
 - No runtime shader compilation — `.spv` files are prebuilt externally
 
+### Phase 2.3.4: Compute pipeline creation
+
+- `ComputePipeline` — RAII wrapper owning `VkPipeline` + `VkPipelineLayout` with correct `Drop` cleanup order (destroy pipeline first, then layout)
+- Pipeline creation from `ShaderModule` + entry point name:
+  - `ComputePipeline::new(device, shader_module, entry_point)` — direct creation
+  - `VulkanContext::create_compute_pipeline(shader_module, entry_point)` — context-integrated creation
+- Pipeline layout starts minimal: no descriptor sets, no push constants
+- Entry point validation:
+  - CString conversion failure caught as `InvalidEntryPoint` error
+  - Null bytes in entry point name rejected before Vulkan API call
+- Error types: `PipelineLayoutCreation(vk::Result)`, `ComputePipelineCreation(vk::Result)`, `InvalidEntryPoint(String)`
+- Accessors: `handle()` returns `vk::Pipeline`, `layout()` returns `vk::PipelineLayout`
+- 14 new unit tests: struct construction (5), CString entry point validation (5), error display (3), drop safety (1)
+- Designed for extension: descriptor set layouts, push constants, specialization constants, and pipeline cache can be added by extending the `PipelineLayoutCreateInfo` builder
+
 ### Phase 2.3.2: Staging upload path
 
 - `Fence` — RAII wrapper for `VkFence` with `create()`, `create_signaled()`, `wait()`, `reset()`, and correct `Drop` cleanup
@@ -110,7 +125,7 @@
 | Crate | State | What it does |
 |---|---|---|
 | `vulkanize-gguf` | **Functional** | Parses GGUF v3 files, exposes typed metadata and tensor descriptors |
-| `vulkanize-vulkan-backend` | **Partial** | Full Vulkan init through buffer allocation, staging upload, and shader module loading. `VulkanContext` owns instance/device/queue/command pool/memory selector. `VulkanBuffer` provides RAII buffer+memory management with mapping support. `CommandBuffer` and `Fence` provide command recording, submission, and synchronous execution. `upload_to_device_local()` provides end-to-end CPU→GPU data upload. `ShaderModule` provides RAII SPIR-V shader module loading from bytes or `.spv` files, with pre-validation for alignment and emptiness. No pipelines, dispatches, or compute shaders yet. |
+| `vulkanize-vulkan-backend` | **Partial** | Full Vulkan init through buffer allocation, staging upload, shader module loading, and compute pipeline creation. `VulkanContext` owns instance/device/queue/command pool/memory selector. `VulkanBuffer` provides RAII buffer+memory management with mapping support. `CommandBuffer` and `Fence` provide command recording, submission, and synchronous execution. `upload_to_device_local()` provides end-to-end CPU→GPU data upload. `ShaderModule` provides RAII SPIR-V shader module loading from bytes or `.spv` files, with pre-validation for alignment and emptiness. `ComputePipeline` provides RAII compute pipeline + pipeline layout management. No dispatches or compute shader execution yet. |
 | `vulkanize-runtime` | **Stub** | `pub fn init() {}` — placeholder |
 | `vulkanize-api` | **Stub** | `pub fn init() {}` — placeholder |
 | `vulkanize` (cli) | **Partial** | `inspect` works, `vulkan-info` works. `generate` and `serve` print "not yet implemented". |
@@ -126,7 +141,6 @@ vulkanize serve                     # stub — exits with "not yet implemented"
 
 ## What is NOT yet implemented
 
-- Compute pipeline creation from shader modules
 - Compute dispatch (`vkCmdDispatch`)
 - Weight loading from GGUF files (upload path exists but not integrated)
 - Descriptor sets and pipeline layouts
