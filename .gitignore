@@ -1,10 +1,94 @@
+# =========================
+# Rust
+# =========================
+
 /target/
+
+# Commit Cargo.lock for reproducible builds
+# (recommended for binaries/applications)
+# Cargo.lock
+
+
+# =========================
+# Vulkan / Shader Artifacts
+# =========================
+
 **/*.spv
+shader-cache/
+pipeline-cache/
+
+
+# =========================
+# AI Models / Weights
+# =========================
+
 *.gguf
 *.bin
 *.pt
+*.pth
+*.ckpt
 *.safetensors
+
+
+# =========================
+# Benchmark / Profiling Output
+# =========================
+
+bench-results/
+profiling/
+*.jsonl
+*.csv
+
+
+# =========================
+# Runtime / Temporary Files
+# =========================
+
+tmp/
+cache/
+*.tmp
+*.log
+
+
+# =========================
+# Environment / Secrets
+# =========================
+
+.env
+.env.*
+*.key
+*.pem
+
+
+# =========================
+# Editors / IDEs
+# =========================
+
 .vscode/
 .idea/
 *.rs.bk
-Cargo.lock
+
+
+# =========================
+# Operating System Junk
+# =========================
+
+.DS_Store
+Thumbs.db
+
+
+# =========================
+# Generated Test Assets
+# =========================
+
+test-output/
+generated/
+
+
+# =========================
+# Optional Local Data
+# =========================
+
+downloads/
+models/
+datasets/
