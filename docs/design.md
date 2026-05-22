@@ -4,6 +4,10 @@
 
 Independent GGUF inference runtime targeting AMD GPUs via Vulkan compute. Not a wrapper around llama.cpp; llama.cpp is only a reference implementation and benchmark baseline.
 
+## Core principle
+
+Vulkanize is not only meant to run GGUF models — it is meant to run them efficiently on AMD GPUs through Vulkan. Every architectural decision, kernel design choice, and runtime control should serve that goal. Running a model correctly is the baseline; running it fast on AMD hardware is the objective.
+
 ## Architecture overview
 
 ```

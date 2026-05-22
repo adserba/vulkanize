@@ -76,43 +76,37 @@
 - [ ] Vulkan timeline semaphores for multi-batch pipelining
 - [ ] Benchmark suite with automated llama.cpp comparison
 
-## Future server and inference controls
+## Future design requirements
 
-Vulkanize should eventually expose granular runtime controls similar in spirit to mature inference servers, but designed around AMD/Vulkan rather than CUDA/ROCm.
+The items below are future design requirements, not current implementation tasks. They define the capabilities Vulkanize must support as the project matures.
 
-Planned runtime flags:
+### Granular runtime controls
 
-- model path
-- host / port
+Future inference and server design must expose runtime controls comparable in spirit to mature inference runtimes such as llama.cpp, but designed around AMD/Vulkan rather than CUDA/ROCm.
+
+Required controls:
+
 - context size
 - batch size
 - microbatch size
-- AMD GPU device selection
+- GPU device selection
 - KV cache configuration
-- sampling settings:
-  - temperature
-  - top-p
-  - top-k
-  - min-p
-  - repeat penalty
-  - presence penalty
-  - seed
-  - max output tokens
+- prompt cache controls
+- sampling parameters (temperature, top-p, top-k, min-p, repeat penalty, presence penalty, seed, max tokens)
 - memory limits
+- concurrency controls
 - shader/kernel selection
 - pipeline cache options
-- prompt cache controls
-- reusable KV cache controls
-- server concurrency limits
-- OpenAI-compatible API mode
+- OpenAI-compatible API flags
 
-Planned performance features:
+### Performance roadmap
 
+Future performance work items:
+
+- MTP / multi-token prediction
 - speculative decoding
-- MTP / multi-token prediction support
-- prompt cache
 - reusable KV cache
 - paged KV cache if useful
-- AMD-specific shader variants
-- RDNA3/RDNA4-specific kernel paths
-- cooperative matrix / matrix core support where available
+- AMD/RDNA-specific optimized kernels
+- cooperative matrix / matrix-core paths where available
+- benchmarking against llama.cpp
