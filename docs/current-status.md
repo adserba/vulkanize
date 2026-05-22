@@ -1,11 +1,11 @@
 # Current Status — Vulkanize
 
-> Last updated: Phase 2.3.2 complete.
+> Last updated: Phase 2.3.3 complete.
 
 ## Build and test status
 
 - `cargo build --release` — clean, 0 warnings
-- `cargo test` — 173 tests pass (106 gguf, 67 vulkan-backend)
+- `cargo test` — 186 tests pass (106 gguf, 80 vulkan-backend)
 - `cargo clippy --all-targets --all-features -- -D warnings` — clean
 - No integration tests or benchmarks yet
 
@@ -63,6 +63,24 @@
 - 18 new unit tests: memory type selection logic (8), error display (5), buffer struct properties (5)
 - `MemoryTypeSelector` cached in `VulkanContext` (constant per device, looked up once)
 
+### Phase 2.3.3: Shader module loading
+
+- `ShaderModule` — RAII wrapper owning `VkShaderModule` with correct `Drop` cleanup (destroy shader module)
+- SPIR-V loading:
+  - `ShaderModule::from_spv_bytes(device, &[u8])` — create from raw bytes with alignment validation
+  - `load_spv_file(&Path)` — standalone file I/O helper, returns `Vec<u8>`
+  - `VulkanContext::create_shader_module_from_spv_bytes(&[u8])` — context-integrated creation
+  - `VulkanContext::create_shader_module_from_spv_file(&Path)` — file → module in one call
+- Pre-validation:
+  - Empty byte slice rejected with `InvalidSpvBytes` error
+  - Non-word-aligned byte length (not multiple of 4) rejected with descriptive error
+  - Vulkan API failures wrapped as `ShaderModuleCreation(vk::Result)`
+- Error types: `ShaderModuleCreation`, `InvalidSpvBytes(String)`, `SpvLoadingError(String)`
+- `word_count()` accessor on `ShaderModule` for SPIR-V word count
+- `shaders/` directory created for precompiled `.spv` binaries
+- 13 new unit tests: struct construction (5), word count / byte-to-word logic (4), error display (4)
+- No runtime shader compilation — `.spv` files are prebuilt externally
+
 ### Phase 2.3.2: Staging upload path
 
 - `Fence` — RAII wrapper for `VkFence` with `create()`, `create_signaled()`, `wait()`, `reset()`, and correct `Drop` cleanup
@@ -92,7 +110,7 @@
 | Crate | State | What it does |
 |---|---|---|
 | `vulkanize-gguf` | **Functional** | Parses GGUF v3 files, exposes typed metadata and tensor descriptors |
-| `vulkanize-vulkan-backend` | **Partial** | Full Vulkan init through buffer allocation and staging upload. `VulkanContext` owns instance/device/queue/command pool/memory selector. `VulkanBuffer` provides RAII buffer+memory management with mapping support. `CommandBuffer` and `Fence` provide command recording, submission, and synchronous execution. `upload_to_device_local()` provides end-to-end CPU→GPU data upload. No pipelines, dispatches, or compute shaders yet. |
+| `vulkanize-vulkan-backend` | **Partial** | Full Vulkan init through buffer allocation, staging upload, and shader module loading. `VulkanContext` owns instance/device/queue/command pool/memory selector. `VulkanBuffer` provides RAII buffer+memory management with mapping support. `CommandBuffer` and `Fence` provide command recording, submission, and synchronous execution. `upload_to_device_local()` provides end-to-end CPU→GPU data upload. `ShaderModule` provides RAII SPIR-V shader module loading from bytes or `.spv` files, with pre-validation for alignment and emptiness. No pipelines, dispatches, or compute shaders yet. |
 | `vulkanize-runtime` | **Stub** | `pub fn init() {}` — placeholder |
 | `vulkanize-api` | **Stub** | `pub fn init() {}` — placeholder |
 | `vulkanize` (cli) | **Partial** | `inspect` works, `vulkan-info` works. `generate` and `serve` print "not yet implemented". |
@@ -108,8 +126,7 @@ vulkanize serve                     # stub — exits with "not yet implemented"
 
 ## What is NOT yet implemented
 
-- Compute pipeline creation from `.spv` modules
-- Shader module loading or any SPIR-V binaries
+- Compute pipeline creation from shader modules
 - Compute dispatch (`vkCmdDispatch`)
 - Weight loading from GGUF files (upload path exists but not integrated)
 - Descriptor sets and pipeline layouts

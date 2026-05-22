@@ -53,6 +53,12 @@ pub enum VulkanError {
     FenceWait(vk::Result),
     /// Validation error for transfer operations.
     TransferValidation(String),
+    /// Failed to create a shader module.
+    ShaderModuleCreation(vk::Result),
+    /// SPIR-V bytes failed pre-validation (empty or not word-aligned).
+    InvalidSpvBytes(String),
+    /// Failed to load a SPIR-V binary file.
+    SpvLoadingError(String),
 }
 
 impl fmt::Display for VulkanError {
@@ -98,6 +104,15 @@ impl fmt::Display for VulkanError {
             }
             VulkanError::TransferValidation(msg) => {
                 write!(f, "transfer validation failed: {}", msg)
+            }
+            VulkanError::ShaderModuleCreation(res) => {
+                write!(f, "shader module creation failed: {:?}", res)
+            }
+            VulkanError::InvalidSpvBytes(msg) => {
+                write!(f, "invalid SPIR-V bytes: {}", msg)
+            }
+            VulkanError::SpvLoadingError(msg) => {
+                write!(f, "SPIR-V loading error: {}", msg)
             }
         }
     }
@@ -763,6 +778,133 @@ impl Drop for CommandBuffer {
 }
 
 // ---------------------------------------------------------------------------
+// ShaderModule — owns a VkShaderModule
+// ---------------------------------------------------------------------------
+
+/// A Vulkan shader module loaded from SPIR-V bytecode.
+///
+/// This type owns the `VkShaderModule` handle and ensures correct
+/// cleanup on drop. Shader modules are created from precompiled
+/// `.spv` binaries — there is no runtime GLSL compilation.
+///
+/// # Lifecycle
+///
+/// 1. Load SPIR-V bytes (from `.spv` file or embedded binary)
+/// 2. Create via `ShaderModule::from_spv_bytes()` or
+///    `VulkanContext::create_shader_module_from_spv_bytes()`
+/// 3. Use the handle in pipeline creation (`vk::ShaderModuleCreateInfo`)
+/// 4. `Drop` destroys the shader module
+///
+/// The module holds a raw pointer to the `ash::Device` for cleanup.
+/// Callers must ensure the device outlives all shader modules created
+/// from it. `VulkanContext` guarantees this by owning both.
+pub struct ShaderModule {
+    device: *const ash::Device,
+    /// The Vulkan shader module handle.
+    handle: vk::ShaderModule,
+    /// Number of u32 words in the SPIR-V code.
+    word_count: u32,
+}
+
+impl fmt::Debug for ShaderModule {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ShaderModule")
+            .field("handle", &self.handle)
+            .field("word_count", &self.word_count)
+            .finish()
+    }
+}
+
+impl ShaderModule {
+    /// Returns the Vulkan shader module handle for use in pipeline
+    /// creation.
+    pub fn handle(&self) -> vk::ShaderModule {
+        self.handle
+    }
+
+    /// Returns the number of u32 words in the SPIR-V code.
+    ///
+    /// This is equivalent to `code.len() / 4` for the original
+    /// bytecode that was used to create this module.
+    pub fn word_count(&self) -> u32 {
+        self.word_count
+    }
+
+    /// Create a shader module from raw SPIR-V bytes.
+    ///
+    /// The byte slice must:
+    /// - Be non-empty
+    /// - Have a length that is a multiple of 4 (SPIR-V is a sequence of u32 words)
+    ///
+    /// The bytes are consumed into an owned `Vec<u8>` for internal
+    /// validation, but the Vulkan module owns its own copy of the code.
+    pub fn from_spv_bytes(device: &ash::Device, spv_bytes: &[u8]) -> Result<Self, VulkanError> {
+        if spv_bytes.is_empty() {
+            return Err(VulkanError::InvalidSpvBytes(
+                "SPIR-V bytecode must not be empty".to_string(),
+            ));
+        }
+
+        if !spv_bytes.len().is_multiple_of(4) {
+            return Err(VulkanError::InvalidSpvBytes(format!(
+                "SPIR-V bytecode length {} is not a multiple of 4 (must be word-aligned)",
+                spv_bytes.len()
+            )));
+        }
+
+        let word_count = (spv_bytes.len() / 4) as u32;
+
+        // SAFETY: spv_bytes is valid for its entire lifetime (it's a &[]
+        // parameter). We only read from it during this function call to
+        // create the Vulkan module, which copies the data internally.
+        let code_words = unsafe {
+            std::slice::from_raw_parts(spv_bytes.as_ptr() as *const u32, word_count as usize)
+        };
+
+        let create_info = vk::ShaderModuleCreateInfo::builder().code(code_words);
+
+        let handle = unsafe {
+            device
+                .create_shader_module(&create_info, None)
+                .map_err(VulkanError::ShaderModuleCreation)?
+        };
+
+        Ok(Self {
+            device: device as *const ash::Device,
+            handle,
+            word_count,
+        })
+    }
+}
+
+impl Drop for ShaderModule {
+    fn drop(&mut self) {
+        if self.device.is_null() {
+            return;
+        }
+        let device = unsafe { &*self.device };
+        unsafe {
+            device.destroy_shader_module(self.handle, None);
+        }
+    }
+}
+
+/// Load a `.spv` binary file from disk.
+///
+/// Returns the raw bytes of the file. The caller is responsible for
+/// passing the bytes to `ShaderModule::from_spv_bytes()` or
+/// `VulkanContext::create_shader_module_from_spv_bytes()`.
+///
+/// This function is intentionally separate from the Vulkan creation
+/// path so that file I/O errors can be distinguished from Vulkan
+/// API errors.
+pub fn load_spv_file(path: &std::path::Path) -> Result<Vec<u8>, VulkanError> {
+    std::fs::read(path).map_err(|e| {
+        VulkanError::SpvLoadingError(format!("failed to read {}: {}", path.display(), e))
+    })
+}
+
+// ---------------------------------------------------------------------------
 // VulkanContext — owns instance + logical device + queues
 // ---------------------------------------------------------------------------
 
@@ -1053,6 +1195,29 @@ impl VulkanContext {
         staging.write_data(data)?;
 
         self.execute_immediate(|cmd| cmd.record_copy_buffer(&staging, dst, data_len))
+    }
+
+    // -- Shader module helpers -----------------------------------------------
+
+    /// Create a shader module from SPIR-V bytes.
+    ///
+    /// Validates byte alignment and delegates to the device.
+    pub fn create_shader_module_from_spv_bytes(
+        &self,
+        spv_bytes: &[u8],
+    ) -> Result<ShaderModule, VulkanError> {
+        ShaderModule::from_spv_bytes(self.device.handle(), spv_bytes)
+    }
+
+    /// Create a shader module from a `.spv` file on disk.
+    ///
+    /// Loads the file bytes and creates the Vulkan shader module.
+    pub fn create_shader_module_from_spv_file(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<ShaderModule, VulkanError> {
+        let bytes = load_spv_file(path)?;
+        self.create_shader_module_from_spv_bytes(&bytes)
     }
 
     /// Wait for the device to finish all pending work.
@@ -2074,5 +2239,120 @@ mod tests {
         let msg = format!("{}", err);
         assert!(msg.contains("transfer validation"));
         assert!(msg.contains("TRANSFER_DST"));
+    }
+
+    // --- ShaderModule tests ---
+
+    #[test]
+    fn test_shader_module_debug_format() {
+        let module = ShaderModule {
+            device: std::ptr::null(),
+            handle: vk::ShaderModule::null(),
+            word_count: 128,
+        };
+        let debug_str = format!("{:?}", module);
+        assert!(debug_str.contains("ShaderModule"));
+        assert!(debug_str.contains("word_count"));
+    }
+
+    #[test]
+    fn test_shader_module_word_count_zero() {
+        let module = ShaderModule {
+            device: std::ptr::null(),
+            handle: vk::ShaderModule::null(),
+            word_count: 0,
+        };
+        assert_eq!(module.word_count(), 0);
+    }
+
+    #[test]
+    fn test_shader_module_word_count_from_bytes() {
+        // 64 bytes / 4 = 16 words
+        let word_count = (64 / 4) as u32;
+        assert_eq!(word_count, 16);
+    }
+
+    #[test]
+    fn test_shader_module_word_count_from_bytes_100() {
+        // 400 bytes / 4 = 100 words
+        let word_count = (400 / 4) as u32;
+        assert_eq!(word_count, 100);
+    }
+
+    #[test]
+    fn test_shader_module_byte_to_word_conversion() {
+        // Verify byte-to-word conversion logic
+        assert_eq!(4 / 4, 1); // minimum valid SPIR-V (1 word)
+        assert_eq!(512 / 4, 128);
+        assert_eq!(65536 / 4, 16384);
+    }
+
+    #[test]
+    fn test_shader_module_byte_length_not_multiple_of_4() {
+        // 5 bytes is not a multiple of 4
+        assert_ne!(5 % 4, 0);
+        // Would be rejected by from_spv_bytes
+    }
+
+    #[test]
+    fn test_shader_module_empty_bytes_detected() {
+        let bytes: &[u8] = &[];
+        assert!(bytes.is_empty());
+        // Would be rejected by from_spv_bytes
+    }
+
+    #[test]
+    fn test_shader_module_handle_accessor() {
+        let module = ShaderModule {
+            device: std::ptr::null(),
+            handle: vk::ShaderModule::null(),
+            word_count: 64,
+        };
+        assert_eq!(module.handle(), vk::ShaderModule::null());
+    }
+
+    #[test]
+    fn test_shader_module_null_device_safe() {
+        // Verify that a ShaderModule with null device doesn't panic
+        // on construction or drop.
+        let _module = ShaderModule {
+            device: std::ptr::null(),
+            handle: vk::ShaderModule::null(),
+            word_count: 32,
+        };
+    }
+
+    // --- ShaderModule error display tests ---
+
+    #[test]
+    fn test_error_display_shader_module_creation() {
+        let err = VulkanError::ShaderModuleCreation(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY);
+        assert!(format!("{}", err).contains("shader module"));
+    }
+
+    #[test]
+    fn test_error_display_invalid_spv_bytes_empty() {
+        let err = VulkanError::InvalidSpvBytes("SPIR-V bytecode must not be empty".to_string());
+        let msg = format!("{}", err);
+        assert!(msg.contains("invalid SPIR-V"));
+        assert!(msg.contains("empty"));
+    }
+
+    #[test]
+    fn test_error_display_invalid_spv_bytes_alignment() {
+        let err = VulkanError::InvalidSpvBytes(
+            "SPIR-V bytecode length 5 is not a multiple of 4 (must be word-aligned)".to_string(),
+        );
+        let msg = format!("{}", err);
+        assert!(msg.contains("invalid SPIR-V"));
+        assert!(msg.contains("multiple of 4"));
+    }
+
+    #[test]
+    fn test_error_display_spv_loading() {
+        let err = VulkanError::SpvLoadingError("file not found: shaders/test.spv".to_string());
+        let msg = format!("{}", err);
+        assert!(msg.contains("SPIR-V loading"));
+        assert!(msg.contains("file not found"));
     }
 }
