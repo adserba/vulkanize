@@ -123,14 +123,16 @@ fn main() {
             match vulkanize_vulkan_backend::VulkanContext::new() {
                 Ok(ctx) => {
                     let info = ctx.physical_device_info();
-                    let queues = ctx.queues();
+                    let qfamily = ctx.queue_family();
+                    let device = ctx.device();
+                    let commands = ctx.commands();
                     let all_devices = ctx.enumerate_physical_devices().unwrap_or_default();
 
                     println!("Vulkan Info");
                     println!("===========");
                     println!();
 
-                    // Selected device
+                    // Selected physical device
                     println!("Selected GPU:");
                     println!("  name:           {}", info.name);
                     println!("  type:           {}", vulkanize_vulkan_backend::format_device_type(info.device_type));
@@ -141,10 +143,16 @@ fn main() {
                     println!("  driver name:    {}", info.driver_name);
                     println!();
 
+                    // Logical device
+                    println!("Logical device:");
+                    println!("  created:        yes");
+                    println!("  compute queue:  {:?} (family {}, index 0)", device.compute_queue, qfamily.queue_family_index);
+                    println!();
+
                     // Queue families
                     println!("Queue families ({}):", info.queue_families.len());
                     for qf in &info.queue_families {
-                        let selected = if qf.index == queues.queue_family_index {
+                        let selected = if qf.index == qfamily.queue_family_index {
                             " *"
                         } else {
                             ""
@@ -160,10 +168,11 @@ fn main() {
                     println!("  (* = selected compute queue family)");
                     println!();
 
-                    // Compute queue details
-                    println!("Compute queue:");
-                    println!("  family: {}", queues.queue_family_index);
-                    println!("  index:  {}", queues.queue_index);
+                    // Command pool
+                    println!("Command pool:");
+                    println!("  created:        yes");
+                    println!("  family:         {}", qfamily.queue_family_index);
+                    println!("  handle:         {:?}", commands.command_pool);
                     println!();
 
                     // Extensions

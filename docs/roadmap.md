@@ -35,7 +35,17 @@
 - [x] `vulkanize vulkan-info` CLI command
 - [x] 22 unit tests for formatting helpers and error types
 
-### Phase 2.2: Buffers and pipelines (next)
+### Phase 2.2: Logical device, compute queue, command pool (done)
+
+- [x] `VulkanDevice` wrapping logical device + compute queue
+- [x] `QueueFamilySelection` for compute queue family discovery
+- [x] `CommandResources` for command pool
+- [x] `VulkanContext` composes VulkanDevice + QueueFamilySelection + CommandResources
+- [x] Clean Drop/destruction order: command pool → device → instance
+- [x] `vulkanize vulkan-info` confirms logical device, queue family, command pool
+- [x] Unit tests for QueueFamilySelection, QueueFamilyInfo, error display
+
+### Phase 2.3: Buffers and pipelines (next)
 
 - [ ] Buffer allocation helpers (device-local, host-visible staging)
 - [ ] Compute pipeline from `.spv` module

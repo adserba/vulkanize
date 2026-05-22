@@ -104,14 +104,34 @@ pub struct PhysicalDeviceInfo {
     pub extensions: Vec<String>,
 }
 
-/// Handles for the queues and command pool acquired from a logical device.
-pub struct QueueHandles {
-    /// The compute queue handle (raw Vulkan handle).
-    pub compute_queue: vk::Queue,
-    /// Index of the queue family that owns `compute_queue`.
+/// Result of selecting a compute-capable queue family from a physical device.
+#[derive(Debug, Clone)]
+pub struct QueueFamilySelection {
+    /// Index of the selected queue family.
     pub queue_family_index: u32,
-    /// Index within the family.
-    pub queue_index: u32,
+    /// Number of queues available in this family.
+    pub queue_count: u32,
+    /// Queue flags for the selected family.
+    pub queue_flags: vk::QueueFlags,
+}
+
+/// A Vulkan logical device with its compute queue.
+pub struct VulkanDevice {
+    /// The underlying ash device handle.
+    inner: ash::Device,
+    /// The compute queue retrieved from the device.
+    pub compute_queue: vk::Queue,
+}
+
+impl VulkanDevice {
+    /// Returns a reference to the underlying `ash::Device`.
+    pub fn handle(&self) -> &ash::Device {
+        &self.inner
+    }
+}
+
+/// Command pool and associated resources for recording commands.
+pub struct CommandResources {
     /// Command pool bound to the compute queue family.
     pub command_pool: vk::CommandPool,
 }
@@ -130,10 +150,12 @@ pub struct VulkanContext {
     physical_device: vk::PhysicalDevice,
     /// Cached info about the selected physical device.
     physical_device_info: PhysicalDeviceInfo,
-    /// Logical device.
-    device: ash::Device,
-    /// Compute queue and command pool.
-    queues: QueueHandles,
+    /// Logical device and compute queue.
+    device: VulkanDevice,
+    /// Selected queue family information.
+    queue_family: QueueFamilySelection,
+    /// Command pool resources.
+    commands: CommandResources,
 }
 
 impl VulkanContext {
@@ -145,15 +167,17 @@ impl VulkanContext {
         let entry = unsafe { Entry::load() }.map_err(|_| VulkanError::LoaderNotFound)?;
         let instance = create_instance(&entry)?;
         let (physical_device, info) = select_device(&instance)?;
-        let (device, queues) = create_device(&instance, physical_device)?;
+        let (vulkan_device, queue_family, commands) =
+            create_device(&instance, physical_device)?;
 
         Ok(Self {
             entry,
             instance,
             physical_device,
             physical_device_info: info,
-            device,
-            queues,
+            device: vulkan_device,
+            queue_family,
+            commands,
         })
     }
 
@@ -167,7 +191,8 @@ impl VulkanContext {
         &self.instance
     }
 
-    pub fn device(&self) -> &ash::Device {
+    /// Returns the logical device wrapper.
+    pub fn device(&self) -> &VulkanDevice {
         &self.device
     }
 
@@ -179,15 +204,21 @@ impl VulkanContext {
         &self.physical_device_info
     }
 
-    pub fn queues(&self) -> &QueueHandles {
-        &self.queues
+    /// Returns the selected compute queue family information.
+    pub fn queue_family(&self) -> &QueueFamilySelection {
+        &self.queue_family
+    }
+
+    /// Returns the command pool resources.
+    pub fn commands(&self) -> &CommandResources {
+        &self.commands
     }
 
     /// Wait for the device to finish all pending work.
     ///
     /// Useful for cleanup / shutdown.  Avoid in hot paths.
     pub fn wait_idle(&self) -> Result<(), vk::Result> {
-        unsafe { self.device.device_wait_idle() }
+        unsafe { self.device.handle().device_wait_idle() }
     }
 
     /// Enumerate **all** physical devices on the system (useful for
@@ -210,8 +241,11 @@ impl VulkanContext {
 impl Drop for VulkanContext {
     fn drop(&mut self) {
         unsafe {
-            self.device.destroy_command_pool(self.queues.command_pool, None);
-            self.device.destroy_device(None);
+            self.device.handle().destroy_command_pool(
+                self.commands.command_pool,
+                None,
+            );
+            self.device.handle().destroy_device(None);
             self.instance.destroy_instance(None);
         }
     }
@@ -418,22 +452,30 @@ fn select_device(
 }
 
 // ---------------------------------------------------------------------------
-// Logical device creation
+// Logical device, queue, and command pool creation
 // ---------------------------------------------------------------------------
 
 fn create_device(
     instance: &Instance,
     pd: vk::PhysicalDevice,
-) -> Result<(ash::Device, QueueHandles), VulkanError> {
+) -> Result<(VulkanDevice, QueueFamilySelection, CommandResources), VulkanError> {
     let queue_families = unsafe {
         instance.get_physical_device_queue_family_properties(pd)
     };
 
-    // Find first compute queue family
+    // Find first compute-capable queue family
     let queue_family_index = queue_families
         .iter()
         .position(|qf| qf.queue_flags.contains(vk::QueueFlags::COMPUTE))
         .ok_or(VulkanError::NoComputeQueue)? as u32;
+
+    let selected_qf = &queue_families[queue_family_index as usize];
+
+    let queue_selection = QueueFamilySelection {
+        queue_family_index,
+        queue_count: selected_qf.queue_count,
+        queue_flags: selected_qf.queue_flags,
+    };
 
     let queue_priorities = [1.0f32];
     let queue_create_info = vk::DeviceQueueCreateInfo::builder()
@@ -462,14 +504,14 @@ fn create_device(
             .map_err(|e| VulkanError::CommandPoolCreation(e))?
     };
 
-    let queues = QueueHandles {
+    let vulkan_device = VulkanDevice {
+        inner: device,
         compute_queue,
-        queue_family_index,
-        queue_index: 0,
-        command_pool,
     };
 
-    Ok((device, queues))
+    let commands = CommandResources { command_pool };
+
+    Ok((vulkan_device, queue_selection, commands))
 }
 
 // ---------------------------------------------------------------------------
@@ -656,6 +698,56 @@ mod tests {
         assert_eq!(format_queue_flags(vk::QueueFlags::empty()), "none");
     }
 
+    // --- QueueFamilySelection tests ---
+
+    #[test]
+    fn test_queue_family_selection_fields() {
+        let sel = QueueFamilySelection {
+            queue_family_index: 2,
+            queue_count: 4,
+            queue_flags: vk::QueueFlags::COMPUTE | vk::QueueFlags::TRANSFER,
+        };
+        assert_eq!(sel.queue_family_index, 2);
+        assert_eq!(sel.queue_count, 4);
+        assert!(sel.queue_flags.contains(vk::QueueFlags::COMPUTE));
+        assert!(sel.queue_flags.contains(vk::QueueFlags::TRANSFER));
+        assert!(!sel.queue_flags.contains(vk::QueueFlags::GRAPHICS));
+    }
+
+    // --- QueueFamilyInfo tests ---
+
+    #[test]
+    fn test_queue_family_info_compute_only() {
+        let info = QueueFamilyInfo {
+            index: 0,
+            queue_count: 1,
+            queue_flags: vk::QueueFlags::COMPUTE,
+            supports_compute: true,
+            supports_graphics: false,
+            supports_transfer: false,
+        };
+        assert!(info.supports_compute);
+        assert!(!info.supports_graphics);
+        assert!(!info.supports_transfer);
+    }
+
+    #[test]
+    fn test_queue_family_info_all_flags() {
+        let info = QueueFamilyInfo {
+            index: 1,
+            queue_count: 2,
+            queue_flags: vk::QueueFlags::GRAPHICS
+                | vk::QueueFlags::COMPUTE
+                | vk::QueueFlags::TRANSFER,
+            supports_compute: true,
+            supports_graphics: true,
+            supports_transfer: true,
+        };
+        assert!(info.supports_compute);
+        assert!(info.supports_graphics);
+        assert!(info.supports_transfer);
+    }
+
     // --- Error display tests ---
 
     #[test]
@@ -675,6 +767,18 @@ mod tests {
     fn test_error_display_no_compute_queue() {
         let err = VulkanError::NoComputeQueue;
         assert!(format!("{}", err).contains("compute queue"));
+    }
+
+    #[test]
+    fn test_error_display_device_creation() {
+        let err = VulkanError::DeviceCreation(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY);
+        assert!(format!("{}", err).contains("logical device"));
+    }
+
+    #[test]
+    fn test_error_display_command_pool_creation() {
+        let err = VulkanError::CommandPoolCreation(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY);
+        assert!(format!("{}", err).contains("command pool"));
     }
 
     #[test]
