@@ -47,9 +47,9 @@ See also: `docs/current-status.md` (what is built), `docs/project-vision.md` (wh
 - [x] `vulkanize vulkan-info` confirms logical device, queue family, command pool
 - [x] Unit tests for QueueFamilySelection, QueueFamilyInfo, error display
 
-### Phase 2.3: Buffers and pipelines (next)
+### Phase 2.3: Buffers and pipelines (in progress)
 
-- [ ] Buffer allocation helpers (device-local, host-visible staging)
+- [x] Buffer allocation helpers (device-local, host-visible staging) — Phase 2.3.1
 - [ ] Compute pipeline from `.spv` module
 - [ ] Command buffer record → submit → wait cycle
 - [ ] Smoke test: dispatch a no-op kernel and verify completion

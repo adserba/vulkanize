@@ -1,11 +1,11 @@
 # Current Status — Vulkanize
 
-> Last updated: Phase 2.2 complete.
+> Last updated: Phase 2.3.1 complete.
 
 ## Build and test status
 
 - `cargo build --release` — clean, 0 warnings
-- `cargo test` — 133 tests pass (106 gguf, 27 vulkan-backend)
+- `cargo test` — 151 tests pass (106 gguf, 45 vulkan-backend)
 - No integration tests or benchmarks yet
 
 ## Completed milestones
@@ -45,12 +45,29 @@
 - Clean Drop order: command pool → device → instance
 - 27 unit tests (formatting helpers, type construction, error display)
 
+### Phase 2.3.1: Buffer allocation layer
+
+- `MemoryTypeSelector` — wraps `vkGetPhysicalDeviceMemoryProperties`, provides `find_memory_type(bits, flags)` helper
+- `VulkanBuffer` — RAII wrapper owning `VkBuffer` + `VkDeviceMemory` with correct Drop cleanup (unmap → free memory → destroy buffer)
+- Buffer creation helpers on `VulkanContext`:
+  - `create_device_local_buffer(size, usage)` — DEVICE_LOCAL memory for weights/KV cache
+  - `create_host_visible_buffer(size)` — HOST_VISIBLE | HOST_COHERENT, auto-mapped, for staging uploads
+  - `create_buffer(size, usage, memory_flags)` — generic creation with arbitrary flags
+- Mapping support on `VulkanBuffer`:
+  - `map()` / `unmap()` — explicit control with double-map protection
+  - `write_data(&[u8])` — convenience: map → memcpy → unmap
+  - `write_at(offset, &[u8])` — offset-aware writes for future suballocation
+- Host-visible buffers are mapped immediately at creation time
+- Error types: `BufferCreation`, `MemoryAllocation`, `MemoryBinding`, `NoSuitableMemoryType`, `MemoryMapping`
+- 18 new unit tests: memory type selection logic (8), error display (5), buffer struct properties (5)
+- `MemoryTypeSelector` cached in `VulkanContext` (constant per device, looked up once)
+
 ## Current crate responsibilities
 
 | Crate | State | What it does |
 |---|---|---|
 | `vulkanize-gguf` | **Functional** | Parses GGUF v3 files, exposes typed metadata and tensor descriptors |
-| `vulkanize-vulkan-backend` | **Partial** | Instance, physical device selection, logical device, compute queue, command pool. No buffers, pipelines, or dispatches yet. |
+| `vulkanize-vulkan-backend` | **Partial** | Full Vulkan init through buffer allocation. `VulkanContext` owns instance/device/queue/command pool/memory selector. `VulkanBuffer` provides RAII buffer+memory management with mapping support. No pipelines, dispatches, or command recording yet. |
 | `vulkanize-runtime` | **Stub** | `pub fn init() {}` — placeholder |
 | `vulkanize-api` | **Stub** | `pub fn init() {}` — placeholder |
 | `vulkanize` (cli) | **Partial** | `inspect` works, `vulkan-info` works. `generate` and `serve` print "not yet implemented". |
@@ -66,7 +83,7 @@ vulkanize serve                     # stub — exits with "not yet implemented"
 
 ## What is NOT yet implemented
 
-- GPU buffer allocation (device-local and host-visible staging)
+- Staging upload path (vkMapMemory → memcpy → vkCmdCopyBuffer → unmap + free)
 - Compute pipeline creation from `.spv` modules
 - Command buffer recording, submission, or synchronization
 - Any shader code or SPIR-V binaries

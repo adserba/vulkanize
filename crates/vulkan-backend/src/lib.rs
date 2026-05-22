@@ -35,6 +35,16 @@ pub enum VulkanError {
     DeviceCreation(vk::Result),
     /// Failed to create the command pool.
     CommandPoolCreation(vk::Result),
+    /// Failed to create a Vulkan buffer.
+    BufferCreation(vk::Result),
+    /// Failed to allocate device memory for a buffer.
+    MemoryAllocation(vk::Result),
+    /// Failed to bind device memory to a buffer.
+    MemoryBinding(vk::Result),
+    /// No suitable memory type found for the requested properties.
+    NoSuitableMemoryType,
+    /// Failed to map device memory.
+    MemoryMapping(vk::Result),
 }
 
 impl fmt::Display for VulkanError {
@@ -53,6 +63,21 @@ impl fmt::Display for VulkanError {
             }
             VulkanError::CommandPoolCreation(res) => {
                 write!(f, "command pool creation failed: {:?}", res)
+            }
+            VulkanError::BufferCreation(res) => {
+                write!(f, "buffer creation failed: {:?}", res)
+            }
+            VulkanError::MemoryAllocation(res) => {
+                write!(f, "device memory allocation failed: {:?}", res)
+            }
+            VulkanError::MemoryBinding(res) => {
+                write!(f, "buffer memory binding failed: {:?}", res)
+            }
+            VulkanError::NoSuitableMemoryType => {
+                write!(f, "no suitable memory type found for requested properties")
+            }
+            VulkanError::MemoryMapping(res) => {
+                write!(f, "device memory mapping failed: {:?}", res)
             }
         }
     }
@@ -137,6 +162,301 @@ pub struct CommandResources {
 }
 
 // ---------------------------------------------------------------------------
+// Memory type selection
+// ---------------------------------------------------------------------------
+
+/// Cached physical device memory properties with a helper to find
+/// a compatible memory type index for buffer allocations.
+///
+/// This is constant per device and should be created once during
+/// initialisation and reused for all buffer allocations.
+pub struct MemoryTypeSelector {
+    properties: vk::PhysicalDeviceMemoryProperties,
+}
+
+impl MemoryTypeSelector {
+    /// Create a new selector from the physical device's memory properties.
+    pub fn new(instance: &Instance, physical_device: vk::PhysicalDevice) -> Self {
+        let properties =
+            unsafe { instance.get_physical_device_memory_properties(physical_device) };
+        Self { properties }
+    }
+
+    /// Find a memory type index that is both compatible with the given
+    /// `memory_type_bits` bitmask and satisfies all requested `properties`.
+    ///
+    /// Returns `None` if no suitable memory type exists.
+    pub fn find_memory_type(
+        &self,
+        memory_type_bits: u32,
+        properties: vk::MemoryPropertyFlags,
+    ) -> Option<u32> {
+        let count = self.properties.memory_type_count as usize;
+        (0..count)
+            .find(|&i| {
+                (memory_type_bits & (1 << i)) != 0
+                    && self.properties.memory_types[i]
+                        .property_flags
+                        .contains(properties)
+            })
+            .map(|i| i as u32)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Vulkan buffer abstraction
+// ---------------------------------------------------------------------------
+
+/// A Vulkan buffer with its associated device memory.
+///
+/// This type owns both the `VkBuffer` handle and the `VkDeviceMemory`
+/// allocation, and ensures correct cleanup order on drop:
+/// unmap (if mapped) → free memory → destroy buffer.
+///
+/// The buffer holds a raw pointer to the `ash::Device` for cleanup.
+/// Callers must ensure the device outlives all buffers created from it.
+/// `VulkanContext` guarantees this by owning both the device and any
+/// buffers created through its methods.
+pub struct VulkanBuffer {
+    device: *const ash::Device,
+    /// The Vulkan buffer handle.
+    pub buffer: vk::Buffer,
+    /// The allocated device memory.
+    pub memory: vk::DeviceMemory,
+    /// Size of the buffer in bytes.
+    pub size: vk::DeviceSize,
+    /// Buffer usage flags used at creation time.
+    pub usage: vk::BufferUsageFlags,
+    /// Memory property flags of the allocated memory.
+    pub memory_property_flags: vk::MemoryPropertyFlags,
+    /// Currently mapped pointer, if the buffer is mapped.
+    mapped_ptr: Option<*mut u8>,
+}
+
+impl fmt::Debug for VulkanBuffer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VulkanBuffer")
+            .field("buffer", &self.buffer)
+            .field("memory", &self.memory)
+            .field("size", &self.size)
+            .field("usage", &self.usage)
+            .field(
+                "memory_property_flags",
+                &self.memory_property_flags,
+            )
+            .field("is_mapped", &self.mapped_ptr.is_some())
+            .finish()
+    }
+}
+
+impl VulkanBuffer {
+    /// Returns the Vulkan buffer handle for use in descriptor sets
+    /// and command recordings.
+    pub fn handle(&self) -> vk::Buffer {
+        self.buffer
+    }
+
+    /// Returns true if this buffer's memory is currently mapped.
+    pub fn is_mapped(&self) -> bool {
+        self.mapped_ptr.is_some()
+    }
+
+    /// Map the buffer's device memory for host access.
+    ///
+    /// The buffer must have been created with `HOST_VISIBLE` memory.
+    /// Only one map is allowed at a time; call `unmap()` first if
+    /// the buffer is already mapped.
+    ///
+    /// For `HOST_COHERENT` memory, writes are visible to the device
+    /// without an explicit flush.
+    pub fn map(&mut self) -> Result<*mut u8, VulkanError> {
+        if self.mapped_ptr.is_some() {
+            return Err(VulkanError::MemoryMapping(
+                vk::Result::ERROR_MEMORY_MAP_FAILED,
+            ));
+        }
+
+        if !self
+            .memory_property_flags
+            .contains(vk::MemoryPropertyFlags::HOST_VISIBLE)
+        {
+            return Err(VulkanError::MemoryMapping(
+                vk::Result::ERROR_MEMORY_MAP_FAILED,
+            ));
+        }
+
+        let device = unsafe { &*self.device };
+        let ptr = unsafe {
+            device
+                .map_memory(self.memory, 0, self.size, vk::MemoryMapFlags::empty())
+                .map_err(VulkanError::MemoryMapping)?
+        };
+
+        self.mapped_ptr = Some(ptr as *mut u8);
+        Ok(ptr as *mut u8)
+    }
+
+    /// Unmap previously mapped device memory.
+    pub fn unmap(&mut self) -> Result<(), VulkanError> {
+        if self.mapped_ptr.is_none() {
+            return Ok(());
+        }
+
+        let device = unsafe { &*self.device };
+        unsafe {
+            device.unmap_memory(self.memory);
+        }
+        self.mapped_ptr = None;
+        Ok(())
+    }
+
+    /// Write data into the buffer at offset 0.
+    ///
+    /// Maps the buffer, copies the data, and unmaps it.
+    /// The buffer must have `HOST_VISIBLE` memory.
+    pub fn write_data(&mut self, data: &[u8]) -> Result<(), VulkanError> {
+        if data.len() > self.size as usize {
+            return Err(VulkanError::MemoryMapping(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY));
+        }
+
+        let ptr = self.map()?;
+        unsafe {
+            std::slice::from_raw_parts_mut(ptr, data.len()).copy_from_slice(data);
+        }
+        self.unmap()?;
+        Ok(())
+    }
+
+    /// Write data into the buffer at a specific byte offset.
+    ///
+    /// Maps the buffer, copies the data at the given offset, and unmaps it.
+    /// The buffer must have `HOST_VISIBLE` memory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `offset + data.len()` exceeds the buffer size.
+    pub fn write_at(
+        &mut self,
+        offset: vk::DeviceSize,
+        data: &[u8],
+    ) -> Result<(), VulkanError> {
+        let end = offset
+            .checked_add(data.len() as vk::DeviceSize)
+            .ok_or(VulkanError::MemoryMapping(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY))?;
+
+        if end > self.size {
+            return Err(VulkanError::MemoryMapping(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY));
+        }
+
+        let ptr = self.map()?;
+        unsafe {
+            std::slice::from_raw_parts_mut(ptr.add(offset as usize), data.len())
+                .copy_from_slice(data);
+        }
+        self.unmap()?;
+        Ok(())
+    }
+
+    /// Internal creation that takes a pre-resolved memory type index.
+    /// Called by `VulkanContext` methods after memory type lookup.
+    fn create_with_memory_type(
+        device: &ash::Device,
+        size: vk::DeviceSize,
+        usage: vk::BufferUsageFlags,
+        memory_property_flags: vk::MemoryPropertyFlags,
+        memory_type_index: u32,
+    ) -> Result<Self, VulkanError> {
+        if size == 0 {
+            return Err(VulkanError::BufferCreation(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY));
+        }
+
+        let create_info = vk::BufferCreateInfo::builder()
+            .size(size)
+            .usage(usage)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+
+        let buffer = unsafe {
+            device
+                .create_buffer(&create_info, None)
+                .map_err(VulkanError::BufferCreation)?
+        };
+
+        let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
+
+        let alloc_info = vk::MemoryAllocateInfo::builder()
+            .allocation_size(requirements.size)
+            .memory_type_index(memory_type_index);
+
+        let memory = unsafe {
+            device
+                .allocate_memory(&alloc_info, None)
+                .map_err(|e| {
+                    device.destroy_buffer(buffer, None);
+                    VulkanError::MemoryAllocation(e)
+                })?
+        };
+
+        unsafe {
+            device
+                .bind_buffer_memory(buffer, memory, 0)
+                .map_err(|e| {
+                    device.free_memory(memory, None);
+                    device.destroy_buffer(buffer, None);
+                    VulkanError::MemoryBinding(e)
+                })?
+        };
+
+        let mut mapped_ptr = None;
+        if memory_property_flags.contains(vk::MemoryPropertyFlags::HOST_VISIBLE) {
+            let ptr = unsafe {
+                device
+                    .map_memory(memory, 0, size, vk::MemoryMapFlags::empty())
+                    .map_err(|e| {
+                        device.free_memory(memory, None);
+                        device.destroy_buffer(buffer, None);
+                        VulkanError::MemoryMapping(e)
+                    })?
+            };
+            mapped_ptr = Some(ptr as *mut u8);
+        }
+
+        Ok(Self {
+            device: device as *const ash::Device,
+            buffer,
+            memory,
+            size,
+            usage,
+            memory_property_flags,
+            mapped_ptr,
+        })
+    }
+}
+
+impl Drop for VulkanBuffer {
+    fn drop(&mut self) {
+        // If device pointer is null (e.g. in tests), skip cleanup.
+        if self.device.is_null() {
+            return;
+        }
+
+        let device = unsafe { &*self.device };
+
+        // Unmap if currently mapped
+        if self.mapped_ptr.is_some() {
+            unsafe {
+                device.unmap_memory(self.memory);
+            }
+            self.mapped_ptr = None;
+        }
+
+        unsafe {
+            device.free_memory(self.memory, None);
+            device.destroy_buffer(self.buffer, None);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // VulkanContext — owns instance + logical device + queues
 // ---------------------------------------------------------------------------
 
@@ -156,6 +476,8 @@ pub struct VulkanContext {
     queue_family: QueueFamilySelection,
     /// Command pool resources.
     commands: CommandResources,
+    /// Cached memory properties for buffer allocation.
+    memory_selector: MemoryTypeSelector,
 }
 
 impl VulkanContext {
@@ -169,6 +491,7 @@ impl VulkanContext {
         let (physical_device, info) = select_device(&instance)?;
         let (vulkan_device, queue_family, commands) =
             create_device(&instance, physical_device)?;
+        let memory_selector = MemoryTypeSelector::new(&instance, physical_device);
 
         Ok(Self {
             entry,
@@ -178,6 +501,7 @@ impl VulkanContext {
             device: vulkan_device,
             queue_family,
             commands,
+            memory_selector,
         })
     }
 
@@ -212,6 +536,87 @@ impl VulkanContext {
     /// Returns the command pool resources.
     pub fn commands(&self) -> &CommandResources {
         &self.commands
+    }
+
+    /// Returns the memory type selector for buffer allocations.
+    pub fn memory_selector(&self) -> &MemoryTypeSelector {
+        &self.memory_selector
+    }
+
+    /// Create a device-local buffer for GPU-side data (weights, KV cache).
+    ///
+    /// The buffer is allocated with `DEVICE_LOCAL` memory for fast GPU
+    /// access. Data must be uploaded via a staging buffer and
+    /// `vkCmdCopyBuffer`.
+    pub fn create_device_local_buffer(
+        &self,
+        size: vk::DeviceSize,
+        usage: vk::BufferUsageFlags,
+    ) -> Result<VulkanBuffer, VulkanError> {
+        self.create_buffer(size, usage, vk::MemoryPropertyFlags::DEVICE_LOCAL)
+    }
+
+    /// Create a host-visible, coherent staging buffer.
+    ///
+    /// The buffer is allocated with `HOST_VISIBLE | HOST_COHERENT` memory
+    /// and is mapped immediately. Data can be written directly via
+    /// `VulkanBuffer::write_data()`.
+    pub fn create_host_visible_buffer(
+        &self,
+        size: vk::DeviceSize,
+    ) -> Result<VulkanBuffer, VulkanError> {
+        self.create_buffer(
+            size,
+            vk::BufferUsageFlags::TRANSFER_SRC
+                | vk::BufferUsageFlags::TRANSFER_DST
+                | vk::BufferUsageFlags::STORAGE_BUFFER,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )
+    }
+
+    /// Create a buffer with specific usage and memory property flags.
+    pub fn create_buffer(
+        &self,
+        size: vk::DeviceSize,
+        usage: vk::BufferUsageFlags,
+        memory_property_flags: vk::MemoryPropertyFlags,
+    ) -> Result<VulkanBuffer, VulkanError> {
+        if size == 0 {
+            return Err(VulkanError::BufferCreation(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY));
+        }
+
+        let create_info = vk::BufferCreateInfo::builder()
+            .size(size)
+            .usage(usage)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+
+        let buffer = unsafe {
+            self.device
+                .handle()
+                .create_buffer(&create_info, None)
+                .map_err(VulkanError::BufferCreation)?
+        };
+
+        let requirements =
+            unsafe { self.device.handle().get_buffer_memory_requirements(buffer) };
+
+        let memory_type_index = self
+            .memory_selector
+            .find_memory_type(requirements.memory_type_bits, memory_property_flags)
+            .ok_or_else(|| {
+                unsafe {
+                    self.device.handle().destroy_buffer(buffer, None);
+                }
+                VulkanError::NoSuitableMemoryType
+            })?;
+
+        VulkanBuffer::create_with_memory_type(
+            self.device.handle(),
+            size,
+            usage,
+            memory_property_flags,
+            memory_type_index,
+        )
     }
 
     /// Wait for the device to finish all pending work.
@@ -274,7 +679,7 @@ fn create_instance(entry: &Entry) -> Result<Instance, VulkanError> {
     {
         let available = entry
             .enumerate_instance_layer_properties()
-            .map_err(|e| VulkanError::InstanceCreation(e))?;
+            .map_err(VulkanError::InstanceCreation)?;
 
         for layer in VALIDATION_LAYERS {
             if available.iter().any(|l| {
@@ -295,7 +700,7 @@ fn create_instance(entry: &Entry) -> Result<Instance, VulkanError> {
     let instance = unsafe {
         entry
             .create_instance(&create_info, None)
-            .map_err(|e| VulkanError::InstanceCreation(e))?
+            .map_err(VulkanError::InstanceCreation)?
     };
 
     Ok(instance)
@@ -308,8 +713,10 @@ fn create_instance(entry: &Entry) -> Result<Instance, VulkanError> {
 fn get_driver_name(instance: &Instance, pd: vk::PhysicalDevice) -> String {
     // Use VkPhysicalDeviceProperties2 + pNext chaining to get driver name
     let mut driver_props = vk::PhysicalDeviceDriverProperties::default();
-    let mut props2 = vk::PhysicalDeviceProperties2::default();
-    props2.p_next = &mut driver_props as *mut _ as *mut std::ffi::c_void;
+    let mut props2 = vk::PhysicalDeviceProperties2 {
+        p_next: &mut driver_props as *mut _ as *mut std::ffi::c_void,
+        ..Default::default()
+    };
 
     unsafe {
         instance.get_physical_device_properties2(pd, &mut props2);
@@ -489,7 +896,7 @@ fn create_device(
     let device = unsafe {
         instance
             .create_device(pd, &create_info, None)
-            .map_err(|e| VulkanError::DeviceCreation(e))?
+            .map_err(VulkanError::DeviceCreation)?
     };
 
     let compute_queue = unsafe { device.get_device_queue(queue_family_index, 0) };
@@ -501,7 +908,7 @@ fn create_device(
     let command_pool = unsafe {
         device
             .create_command_pool(&command_pool_create_info, None)
-            .map_err(|e| VulkanError::CommandPoolCreation(e))?
+            .map_err(VulkanError::CommandPoolCreation)?
     };
 
     let vulkan_device = VulkanDevice {
@@ -785,5 +1192,257 @@ mod tests {
     fn test_error_is_std_error() {
         let err: Box<dyn std::error::Error> = Box::new(VulkanError::LoaderNotFound);
         assert!(!format!("{}", err).is_empty());
+    }
+
+    // --- Buffer error display tests ---
+
+    #[test]
+    fn test_error_display_buffer_creation() {
+        let err = VulkanError::BufferCreation(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY);
+        assert!(format!("{}", err).contains("buffer creation"));
+    }
+
+    #[test]
+    fn test_error_display_memory_allocation() {
+        let err = VulkanError::MemoryAllocation(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY);
+        assert!(format!("{}", err).contains("memory allocation"));
+    }
+
+    #[test]
+    fn test_error_display_memory_binding() {
+        let err = VulkanError::MemoryBinding(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY);
+        assert!(format!("{}", err).contains("memory binding"));
+    }
+
+    #[test]
+    fn test_error_display_no_suitable_memory_type() {
+        let err = VulkanError::NoSuitableMemoryType;
+        assert!(format!("{}", err).contains("memory type"));
+    }
+
+    #[test]
+    fn test_error_display_memory_mapping() {
+        let err = VulkanError::MemoryMapping(vk::Result::ERROR_MEMORY_MAP_FAILED);
+        assert!(format!("{}", err).contains("memory mapping"));
+    }
+
+    // --- MemoryTypeSelector tests (pure logic, no GPU required) ---
+
+    fn make_memory_properties(
+        types: &[vk::MemoryPropertyFlags],
+    ) -> vk::PhysicalDeviceMemoryProperties {
+        let mut props = vk::PhysicalDeviceMemoryProperties::default();
+        let count = types.len().min(32);
+        props.memory_type_count = count as u32;
+        for (i, flags) in types.iter().enumerate() {
+            props.memory_types[i] = vk::MemoryType {
+                property_flags: *flags,
+                heap_index: 0,
+            };
+        }
+        props
+    }
+
+    #[test]
+    fn test_memory_type_selector_device_local() {
+        let props = make_memory_properties(&[
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            vk::MemoryPropertyFlags::HOST_VISIBLE,
+        ]);
+        let selector = MemoryTypeSelector { properties: props };
+        let idx = selector.find_memory_type(0b11, vk::MemoryPropertyFlags::DEVICE_LOCAL);
+        assert_eq!(idx, Some(0));
+    }
+
+    #[test]
+    fn test_memory_type_selector_host_visible() {
+        let props = make_memory_properties(&[
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        ]);
+        let selector = MemoryTypeSelector { properties: props };
+        let idx =
+            selector.find_memory_type(0b11, vk::MemoryPropertyFlags::HOST_VISIBLE);
+        assert_eq!(idx, Some(1));
+    }
+
+    #[test]
+    fn test_memory_type_selector_host_coherent() {
+        let props = make_memory_properties(&[
+            vk::MemoryPropertyFlags::HOST_VISIBLE,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        ]);
+        let selector = MemoryTypeSelector { properties: props };
+        let idx = selector.find_memory_type(
+            0b11,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        );
+        assert_eq!(idx, Some(1));
+    }
+
+    #[test]
+    fn test_memory_type_selector_no_match() {
+        let props = make_memory_properties(&[
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        ]);
+        let selector = MemoryTypeSelector { properties: props };
+        let idx =
+            selector.find_memory_type(0b1, vk::MemoryPropertyFlags::HOST_VISIBLE);
+        assert_eq!(idx, None);
+    }
+
+    #[test]
+    fn test_memory_type_selector_bitmask_filter() {
+        let props = make_memory_properties(&[
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        ]);
+        let selector = MemoryTypeSelector { properties: props };
+        // Only bit 1 is set, so index 0 should be skipped
+        let idx = selector.find_memory_type(
+            0b10,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        );
+        assert_eq!(idx, Some(1));
+    }
+
+    #[test]
+    fn test_memory_type_selector_empty_bitmask() {
+        let props = make_memory_properties(&[
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        ]);
+        let selector = MemoryTypeSelector { properties: props };
+        let idx =
+            selector.find_memory_type(0, vk::MemoryPropertyFlags::DEVICE_LOCAL);
+        assert_eq!(idx, None);
+    }
+
+    #[test]
+    fn test_memory_type_selector_prefers_first_match() {
+        let props = make_memory_properties(&[
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        ]);
+        let selector = MemoryTypeSelector { properties: props };
+        let idx = selector.find_memory_type(0b111, vk::MemoryPropertyFlags::DEVICE_LOCAL);
+        assert_eq!(idx, Some(0));
+    }
+
+    #[test]
+    fn test_memory_type_selector_cached_device_local() {
+        // Simulates AMD GPU memory layout: type 0 is DEVICE_LOCAL
+        let props = make_memory_properties(&[
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            vk::MemoryPropertyFlags::HOST_VISIBLE
+                | vk::MemoryPropertyFlags::HOST_COHERENT
+                | vk::MemoryPropertyFlags::HOST_CACHED,
+            vk::MemoryPropertyFlags::HOST_VISIBLE
+                | vk::MemoryPropertyFlags::HOST_COHERENT,
+        ]);
+        let selector = MemoryTypeSelector { properties: props };
+
+        // Device-local should find type 0
+        assert_eq!(
+            selector.find_memory_type(0b111, vk::MemoryPropertyFlags::DEVICE_LOCAL),
+            Some(0)
+        );
+
+        // Host-visible + coherent should find type 1 (first match)
+        assert_eq!(
+            selector.find_memory_type(
+                0b111,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT
+            ),
+            Some(1)
+        );
+
+        // Host-visible only should also find type 1
+        assert_eq!(
+            selector.find_memory_type(0b111, vk::MemoryPropertyFlags::HOST_VISIBLE),
+            Some(1)
+        );
+    }
+
+    // --- VulkanBuffer property tests (no GPU, struct construction only) ---
+    // Note: We cannot test actual buffer creation without a Vulkan device.
+    // These tests verify the struct fields and accessor logic.
+
+    #[test]
+    fn test_vulkan_buffer_debug_format() {
+        // Verify Debug impl compiles and produces expected struct name
+        // We can't construct a real VulkanBuffer without a device, but we
+        // can verify the type has Debug via a trait object check.
+        let _: &dyn fmt::Debug = &VulkanBuffer {
+            device: std::ptr::null(),
+            buffer: vk::Buffer::null(),
+            memory: vk::DeviceMemory::null(),
+            size: 1024,
+            usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+            memory_property_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            mapped_ptr: None,
+        };
+    }
+
+    #[test]
+    fn test_vulkan_buffer_is_mapped_false() {
+        let buf = VulkanBuffer {
+            device: std::ptr::null(),
+            buffer: vk::Buffer::null(),
+            memory: vk::DeviceMemory::null(),
+            size: 1024,
+            usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+            memory_property_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            mapped_ptr: None,
+        };
+        assert!(!buf.is_mapped());
+    }
+
+    #[test]
+    fn test_vulkan_buffer_is_mapped_true() {
+        let buf = VulkanBuffer {
+            device: std::ptr::null(),
+            buffer: vk::Buffer::null(),
+            memory: vk::DeviceMemory::null(),
+            size: 1024,
+            usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+            memory_property_flags: vk::MemoryPropertyFlags::HOST_VISIBLE,
+            mapped_ptr: Some(std::ptr::null_mut()),
+        };
+        assert!(buf.is_mapped());
+    }
+
+    #[test]
+    fn test_vulkan_buffer_handle_accessor() {
+        let buf = VulkanBuffer {
+            device: std::ptr::null(),
+            buffer: vk::Buffer::null(),
+            memory: vk::DeviceMemory::null(),
+            size: 1024,
+            usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+            memory_property_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            mapped_ptr: None,
+        };
+        assert_eq!(buf.handle(), vk::Buffer::null());
+    }
+
+    #[test]
+    fn test_vulkan_buffer_fields_public() {
+        let buf = VulkanBuffer {
+            device: std::ptr::null(),
+            buffer: vk::Buffer::null(),
+            memory: vk::DeviceMemory::null(),
+            size: 4096,
+            usage: vk::BufferUsageFlags::STORAGE_BUFFER
+                | vk::BufferUsageFlags::TRANSFER_DST,
+            memory_property_flags: vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            mapped_ptr: None,
+        };
+        assert_eq!(buf.size, 4096);
+        assert!(buf.usage.contains(vk::BufferUsageFlags::STORAGE_BUFFER));
+        assert!(buf.usage.contains(vk::BufferUsageFlags::TRANSFER_DST));
+        assert!(buf
+            .memory_property_flags
+            .contains(vk::MemoryPropertyFlags::DEVICE_LOCAL));
     }
 }
