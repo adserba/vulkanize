@@ -62,23 +62,33 @@ fn smoke_no_op_dispatch() {
         .expect("failed to create descriptor set");
     println!("[8] Created descriptor set");
 
-    // Record WITHOUT barriers - just bind + dispatch
+    // Record WITH explicit memory barriers for correctness
     let mut cmd = ctx
         .allocate_command_buffer()
         .expect("failed to allocate command buffer");
     cmd.begin().expect("failed to begin");
+
+    // Barrier: transfer write (upload) -> shader read (compute dispatch)
+    cmd.record_barrier_transfer_to_compute(&[&device_buf])
+        .expect("failed to record transfer->compute barrier");
+
     cmd.bind_compute_pipeline(&pipeline)
         .expect("failed to bind pipeline");
     cmd.bind_descriptor_sets(pipeline.layout(), 0, &[desc_set.handle()])
         .expect("failed to bind descriptors");
     cmd.dispatch(1, 1, 1).expect("failed to dispatch");
+
+    // Barrier: shader write (compute dispatch) -> transfer read (readback)
+    cmd.record_barrier_compute_to_transfer(&[&device_buf])
+        .expect("failed to record compute->transfer barrier");
+
     cmd.end().expect("failed to end");
     cmd.submit_and_wait(
         ctx.device().compute_queue,
         ctx.queue_family().queue_family_index,
     )
     .expect("failed to submit and wait");
-    println!("[9] Dispatch completed");
+    println!("[9] Dispatch completed (with explicit barriers)");
 
     // Wait and read back
     ctx.wait_idle().expect("wait_idle failed");

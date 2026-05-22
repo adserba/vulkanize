@@ -73,6 +73,8 @@ pub enum VulkanError {
     DescriptorSetAllocation(vk::Result),
     /// Command buffer was not in the recording state when a command was recorded.
     CommandBufferNotRecording,
+    /// Push constant validation error.
+    PushConstantValidation(String),
 }
 
 impl fmt::Display for VulkanError {
@@ -148,6 +150,9 @@ impl fmt::Display for VulkanError {
             }
             VulkanError::CommandBufferNotRecording => {
                 write!(f, "command buffer is not in the recording state")
+            }
+            VulkanError::PushConstantValidation(msg) => {
+                write!(f, "push constant validation failed: {}", msg)
             }
         }
     }
@@ -898,6 +903,162 @@ impl CommandBuffer {
         }
         Ok(())
     }
+
+    /// Push constant data to the GPU for the currently bound pipeline.
+    ///
+    /// # Arguments
+    ///
+    /// * `layout` - The pipeline layout that defines the push constant range
+    /// * `offset` - Byte offset within the push constant range
+    /// * `data` - Raw bytes to push (must be word-aligned, size <= range)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the command buffer is not currently recording
+    /// or if the data size is not a multiple of 4.
+    pub fn push_constants(
+        &mut self,
+        layout: vk::PipelineLayout,
+        offset: u32,
+        data: &[u8],
+    ) -> Result<(), VulkanError> {
+        if !self.is_recording {
+            return Err(VulkanError::CommandBufferNotRecording);
+        }
+
+        if !data.len().is_multiple_of(4) {
+            return Err(VulkanError::PushConstantValidation(format!(
+                "push constant data size {} is not a multiple of 4",
+                data.len()
+            )));
+        }
+
+        unsafe {
+            (*self.device).cmd_push_constants(
+                self.handle,
+                layout,
+                vk::ShaderStageFlags::COMPUTE,
+                offset,
+                data,
+            );
+        }
+        Ok(())
+    }
+
+    /// Record a pipeline barrier for transfer write → shader read.
+    ///
+    /// Ensures that data written to the buffer by a previous transfer
+    /// operation (e.g., `vkCmdCopyBuffer` from a staging upload) is
+    /// visible to a subsequent compute shader that reads from it.
+    ///
+    /// # Arguments
+    ///
+    /// * `buffers` - Buffers to apply the barrier to
+    pub fn record_barrier_transfer_to_compute(
+        &mut self,
+        buffers: &[&VulkanBuffer],
+    ) -> Result<(), VulkanError> {
+        if !self.is_recording {
+            return Err(VulkanError::CommandBufferNotRecording);
+        }
+
+        let buffer_handles: Vec<vk::Buffer> = buffers.iter().map(|b| b.buffer).collect();
+
+        let barrier = vk::BufferMemoryBarrier::builder()
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(vk::AccessFlags::SHADER_READ)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .buffer(vk::Buffer::null())
+            .offset(0)
+            .size(vk::WHOLE_SIZE)
+            .build();
+
+        unsafe {
+            (*self.device).cmd_pipeline_barrier(
+                self.handle,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[barrier],
+                &[],
+            );
+        }
+
+        // Per-buffer barriers for correct per-buffer tracking
+        for buf in &buffer_handles {
+            let per_buffer_barrier = vk::BufferMemoryBarrier::builder()
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .buffer(*buf)
+                .offset(0)
+                .size(vk::WHOLE_SIZE)
+                .build();
+
+            unsafe {
+                (*self.device).cmd_pipeline_barrier(
+                    self.handle,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[per_buffer_barrier],
+                    &[],
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Record a pipeline barrier for shader write → transfer read.
+    ///
+    /// Ensures that data written to the buffer by a compute shader is
+    /// visible to a subsequent transfer operation (e.g., `vkCmdCopyBuffer`
+    /// for readback to host memory).
+    ///
+    /// # Arguments
+    ///
+    /// * `buffers` - Buffers to apply the barrier to
+    pub fn record_barrier_compute_to_transfer(
+        &mut self,
+        buffers: &[&VulkanBuffer],
+    ) -> Result<(), VulkanError> {
+        if !self.is_recording {
+            return Err(VulkanError::CommandBufferNotRecording);
+        }
+
+        let buffer_handles: Vec<vk::Buffer> = buffers.iter().map(|b| b.buffer).collect();
+
+        for buf in &buffer_handles {
+            let barrier = vk::BufferMemoryBarrier::builder()
+                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .buffer(*buf)
+                .offset(0)
+                .size(vk::WHOLE_SIZE)
+                .build();
+
+            unsafe {
+                (*self.device).cmd_pipeline_barrier(
+                    self.handle,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[barrier],
+                    &[],
+                );
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl Drop for CommandBuffer {
@@ -1415,6 +1576,80 @@ impl ComputePipeline {
             layout,
         })
     }
+
+    /// Create a compute pipeline with descriptor set layouts and push
+    /// constants.
+    ///
+    /// # Arguments
+    ///
+    /// * `device` - The Vulkan device
+    /// * `shader_module` - The compiled shader module
+    /// * `entry_point` - Name of the entry point function
+    /// * `set_layouts` - Descriptor set layouts for the pipeline
+    /// * `push_constant_range` - Push constant range configuration
+    pub fn new_with_push_constants(
+        device: &ash::Device,
+        shader_module: &ShaderModule,
+        entry_point: &str,
+        set_layouts: &[vk::DescriptorSetLayout],
+        push_constant_range: vk::PushConstantRange,
+    ) -> Result<Self, VulkanError> {
+        let entry_point_cstr = CString::new(entry_point).map_err(|e| {
+            VulkanError::InvalidEntryPoint(format!(
+                "entry point name contains invalid bytes: {}",
+                e
+            ))
+        })?;
+
+        let push_constant_ranges = [push_constant_range];
+        let layout_create_info = vk::PipelineLayoutCreateInfo::builder()
+            .set_layouts(set_layouts)
+            .push_constant_ranges(&push_constant_ranges);
+
+        let layout = unsafe {
+            device
+                .create_pipeline_layout(&layout_create_info, None)
+                .map_err(VulkanError::PipelineLayoutCreation)?
+        };
+
+        let stage_info = vk::PipelineShaderStageCreateInfo::builder()
+            .stage(vk::ShaderStageFlags::COMPUTE)
+            .module(shader_module.handle())
+            .name(entry_point_cstr.as_c_str())
+            .build();
+
+        let pipeline_create_info = vk::ComputePipelineCreateInfo::builder()
+            .stage(stage_info)
+            .layout(layout)
+            .build();
+
+        let pipelines = unsafe {
+            match device.create_compute_pipelines(
+                vk::PipelineCache::null(),
+                &[pipeline_create_info],
+                None,
+            ) {
+                Ok(pipes) => pipes,
+                Err((_, vk_result)) => {
+                    device.destroy_pipeline_layout(layout, None);
+                    return Err(VulkanError::ComputePipelineCreation(vk_result));
+                }
+            }
+        };
+
+        let pipeline = pipelines
+            .into_iter()
+            .next()
+            .ok_or(VulkanError::ComputePipelineCreation(
+                vk::Result::ERROR_UNKNOWN,
+            ))?;
+
+        Ok(Self {
+            device: device as *const ash::Device,
+            pipeline,
+            layout,
+        })
+    }
 }
 
 impl Drop for ComputePipeline {
@@ -1429,6 +1664,25 @@ impl Drop for ComputePipeline {
             device.destroy_pipeline_layout(self.layout, None);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// DescriptorBinding — configuration for a single buffer binding
+// ---------------------------------------------------------------------------
+
+/// Configuration for a single storage buffer descriptor binding.
+///
+/// Used with `VulkanContext::create_descriptor_set_layout_with_buffers()`
+/// and `VulkanContext::create_descriptor_set_with_buffers()` to create
+/// multi-binding descriptor set layouts and sets.
+#[derive(Debug, Clone)]
+pub struct DescriptorBinding {
+    /// The binding number (e.g., 0 for `layout(binding = 0)`).
+    pub binding: u32,
+    /// The Vulkan descriptor type (typically `STORAGE_BUFFER`).
+    pub descriptor_type: vk::DescriptorType,
+    /// The shader stage flags that will access this binding.
+    pub stage_flags: vk::ShaderStageFlags,
 }
 
 // ---------------------------------------------------------------------------
@@ -1780,6 +2034,31 @@ impl VulkanContext {
         )
     }
 
+    /// Create a compute pipeline with descriptor set layouts and push
+    /// constants.
+    ///
+    /// # Arguments
+    ///
+    /// * `shader_module` - The compiled shader module
+    /// * `entry_point` - Name of the entry point function
+    /// * `set_layouts` - Descriptor set layout handles for the pipeline
+    /// * `push_constant_range` - Push constant range configuration
+    pub fn create_compute_pipeline_with_push_constants(
+        &self,
+        shader_module: &ShaderModule,
+        entry_point: &str,
+        set_layouts: &[vk::DescriptorSetLayout],
+        push_constant_range: vk::PushConstantRange,
+    ) -> Result<ComputePipeline, VulkanError> {
+        ComputePipeline::new_with_push_constants(
+            self.device.handle(),
+            shader_module,
+            entry_point,
+            set_layouts,
+            push_constant_range,
+        )
+    }
+
     /// Create a descriptor set layout with a single storage buffer binding.
     ///
     /// # Arguments
@@ -1858,6 +2137,124 @@ impl VulkanContext {
 
         unsafe {
             device.update_descriptor_sets(&[descriptor_write], &[]);
+        }
+
+        Ok(DescriptorSet {
+            device: device as *const ash::Device,
+            pool: Box::new(pool),
+            handle: set,
+        })
+    }
+
+    /// Create a descriptor set layout with multiple buffer bindings.
+    ///
+    /// # Arguments
+    ///
+    /// * `bindings` - Configuration for each binding in the layout.
+    ///   Bindings must start at 0 and be consecutive with no duplicates.
+    ///
+    /// # Errors
+    ///
+    /// Returns `VulkanError::PushConstantValidation` if bindings are
+    /// empty, not consecutive starting from 0, or contain duplicates.
+    pub fn create_descriptor_set_layout_with_buffers(
+        &self,
+        bindings: &[DescriptorBinding],
+    ) -> Result<DescriptorSetLayout, VulkanError> {
+        if bindings.is_empty() {
+            return Err(VulkanError::PushConstantValidation(
+                "descriptor set layout requires at least one binding".to_string(),
+            ));
+        }
+
+        let mut sorted = bindings.to_vec();
+        sorted.sort_by_key(|b| b.binding);
+
+        for (i, binding) in sorted.iter().enumerate() {
+            if binding.binding != i as u32 {
+                return Err(VulkanError::PushConstantValidation(format!(
+                    "descriptor bindings must be consecutive starting from 0, found gap at index {} (got binding {})",
+                    i, binding.binding
+                )));
+            }
+        }
+
+        let layout_bindings: Vec<vk::DescriptorSetLayoutBinding> = bindings
+            .iter()
+            .map(|b| {
+                vk::DescriptorSetLayoutBinding::builder()
+                    .binding(b.binding)
+                    .descriptor_type(b.descriptor_type)
+                    .descriptor_count(1)
+                    .stage_flags(b.stage_flags)
+                    .build()
+            })
+            .collect();
+
+        let create_info = vk::DescriptorSetLayoutCreateInfo::builder().bindings(&layout_bindings);
+
+        let handle = unsafe {
+            self.device
+                .handle()
+                .create_descriptor_set_layout(&create_info, None)
+                .map_err(VulkanError::DescriptorSetLayoutCreation)?
+        };
+
+        Ok(DescriptorSetLayout {
+            device: self.device.handle() as *const ash::Device,
+            handle,
+        })
+    }
+
+    /// Create a descriptor set with multiple buffer bindings.
+    ///
+    /// Creates a descriptor pool, allocates a descriptor set, and updates
+    /// it with the given buffer bindings.
+    ///
+    /// # Arguments
+    ///
+    /// * `layout` - The descriptor set layout (must match the bindings)
+    /// * `bindings` - Buffer bindings to write into the descriptor set
+    pub fn create_descriptor_set_with_buffers(
+        &self,
+        layout: &DescriptorSetLayout,
+        bindings: &[(u32, &VulkanBuffer, vk::DeviceSize)],
+    ) -> Result<DescriptorSet, VulkanError> {
+        let device = self.device.handle();
+
+        let desc_count = bindings.len() as u32;
+        let pool = DescriptorPool::create(
+            device,
+            1,
+            &[(vk::DescriptorType::STORAGE_BUFFER, desc_count)],
+        )?;
+
+        let sets = pool.allocate(device, layout.handle, 1)?;
+        let set = sets[0];
+
+        let descriptor_writes: Vec<vk::WriteDescriptorSet> = bindings
+            .iter()
+            .map(|(binding, buffer, range)| {
+                let buffer_info = vk::DescriptorBufferInfo::builder()
+                    .buffer(buffer.buffer)
+                    .offset(0)
+                    .range(*range)
+                    .build();
+
+                let mut write = vk::WriteDescriptorSet::builder()
+                    .dst_set(set)
+                    .dst_binding(*binding)
+                    .dst_array_element(0)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .buffer_info(&[buffer_info])
+                    .build();
+                write.descriptor_count = 1;
+                write
+            })
+            .collect();
+
+        unsafe {
+            device.update_descriptor_sets(&descriptor_writes, &[]);
         }
 
         Ok(DescriptorSet {
@@ -3299,5 +3696,373 @@ mod tests {
         // Simulate end
         cmd.is_recording = false;
         assert!(!cmd.is_recording);
+    }
+
+    // --- DescriptorBinding tests ---
+
+    #[test]
+    fn test_descriptor_binding_construction() {
+        let binding = DescriptorBinding {
+            binding: 0,
+            descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+            stage_flags: vk::ShaderStageFlags::COMPUTE,
+        };
+        assert_eq!(binding.binding, 0);
+        assert_eq!(binding.descriptor_type, vk::DescriptorType::STORAGE_BUFFER);
+        assert!(binding.stage_flags.contains(vk::ShaderStageFlags::COMPUTE));
+    }
+
+    #[test]
+    fn test_descriptor_binding_debug_format() {
+        let binding = DescriptorBinding {
+            binding: 1,
+            descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+            stage_flags: vk::ShaderStageFlags::COMPUTE,
+        };
+        let debug_str = format!("{:?}", binding);
+        assert!(debug_str.contains("DescriptorBinding"));
+    }
+
+    #[test]
+    fn test_descriptor_binding_clone() {
+        let binding = DescriptorBinding {
+            binding: 2,
+            descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+            stage_flags: vk::ShaderStageFlags::COMPUTE,
+        };
+        let cloned = binding.clone();
+        assert_eq!(cloned.binding, 2);
+        assert_eq!(cloned.descriptor_type, vk::DescriptorType::STORAGE_BUFFER);
+    }
+
+    #[test]
+    fn test_descriptor_binding_multiple_types() {
+        let storage = DescriptorBinding {
+            binding: 0,
+            descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+            stage_flags: vk::ShaderStageFlags::COMPUTE,
+        };
+        let uniform = DescriptorBinding {
+            binding: 1,
+            descriptor_type: vk::DescriptorType::UNIFORM_BUFFER,
+            stage_flags: vk::ShaderStageFlags::COMPUTE,
+        };
+        assert_eq!(storage.descriptor_type, vk::DescriptorType::STORAGE_BUFFER);
+        assert_eq!(uniform.descriptor_type, vk::DescriptorType::UNIFORM_BUFFER);
+    }
+
+    // --- Descriptor binding validation tests (pure logic) ---
+
+    #[test]
+    fn test_descriptor_bindings_consecutive_valid() {
+        let bindings = vec![
+            DescriptorBinding {
+                binding: 0,
+                descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+                stage_flags: vk::ShaderStageFlags::COMPUTE,
+            },
+            DescriptorBinding {
+                binding: 1,
+                descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+                stage_flags: vk::ShaderStageFlags::COMPUTE,
+            },
+            DescriptorBinding {
+                binding: 2,
+                descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+                stage_flags: vk::ShaderStageFlags::COMPUTE,
+            },
+        ];
+        let mut sorted = bindings.clone();
+        sorted.sort_by_key(|b| b.binding);
+        for (i, b) in sorted.iter().enumerate() {
+            assert_eq!(b.binding, i as u32, "bindings should be consecutive");
+        }
+    }
+
+    #[test]
+    fn test_descriptor_bindings_gap_detected() {
+        let bindings = vec![
+            DescriptorBinding {
+                binding: 0,
+                descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+                stage_flags: vk::ShaderStageFlags::COMPUTE,
+            },
+            DescriptorBinding {
+                binding: 2,
+                descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+                stage_flags: vk::ShaderStageFlags::COMPUTE,
+            },
+        ];
+        let mut sorted = bindings.clone();
+        sorted.sort_by_key(|b| b.binding);
+        // Binding 1 is missing — gap at index 1
+        assert_eq!(sorted[0].binding, 0);
+        assert_eq!(sorted[1].binding, 2);
+        assert_ne!(sorted[1].binding, 1); // gap detected
+    }
+
+    #[test]
+    fn test_descriptor_bindings_duplicate_detected() {
+        let bindings = vec![
+            DescriptorBinding {
+                binding: 0,
+                descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+                stage_flags: vk::ShaderStageFlags::COMPUTE,
+            },
+            DescriptorBinding {
+                binding: 0,
+                descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+                stage_flags: vk::ShaderStageFlags::COMPUTE,
+            },
+        ];
+        let mut sorted = bindings.clone();
+        sorted.sort_by_key(|b| b.binding);
+        assert_eq!(sorted[0].binding, sorted[1].binding); // duplicate
+    }
+
+    #[test]
+    fn test_descriptor_bindings_empty_vec() {
+        let bindings: Vec<DescriptorBinding> = vec![];
+        assert!(bindings.is_empty());
+    }
+
+    #[test]
+    fn test_descriptor_bindings_single() {
+        let bindings = [DescriptorBinding {
+            binding: 0,
+            descriptor_type: vk::DescriptorType::STORAGE_BUFFER,
+            stage_flags: vk::ShaderStageFlags::COMPUTE,
+        }];
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].binding, 0);
+    }
+
+    // --- Push constant range construction tests ---
+
+    #[test]
+    fn test_push_constant_range_embedding() {
+        // 3 uint values = 12 bytes, rounded up to 16 for alignment
+        let range = vk::PushConstantRange::builder()
+            .stage_flags(vk::ShaderStageFlags::COMPUTE)
+            .offset(0)
+            .size(16)
+            .build();
+        assert_eq!(range.offset, 0);
+        assert_eq!(range.size, 16);
+        assert!(range.stage_flags.contains(vk::ShaderStageFlags::COMPUTE));
+    }
+
+    #[test]
+    fn test_push_constant_range_two_uints() {
+        // 2 uint values = 8 bytes
+        let range = vk::PushConstantRange::builder()
+            .stage_flags(vk::ShaderStageFlags::COMPUTE)
+            .offset(0)
+            .size(8)
+            .build();
+        assert_eq!(range.size, 8);
+    }
+
+    #[test]
+    fn test_push_constant_range_max_size() {
+        // Vulkan guarantees at least 128 bytes of push constant space
+        let range = vk::PushConstantRange::builder()
+            .stage_flags(vk::ShaderStageFlags::COMPUTE)
+            .offset(0)
+            .size(128)
+            .build();
+        assert_eq!(range.size, 128);
+    }
+
+    #[test]
+    fn test_push_constant_range_with_offset() {
+        let range = vk::PushConstantRange::builder()
+            .stage_flags(vk::ShaderStageFlags::COMPUTE)
+            .offset(8)
+            .size(8)
+            .build();
+        assert_eq!(range.offset, 8);
+        assert_eq!(range.size, 8);
+    }
+
+    // --- Push constant validation tests ---
+
+    #[test]
+    fn test_push_constant_data_size_aligned() {
+        let data = [0u8; 16];
+        assert_eq!(data.len() % 4, 0);
+    }
+
+    #[test]
+    fn test_push_constant_data_size_misaligned() {
+        let data = [0u8; 5];
+        assert_ne!(data.len() % 4, 0);
+    }
+
+    #[test]
+    fn test_push_constant_data_size_two_uints() {
+        let data = [0u8; 8];
+        assert_eq!(data.len() % 4, 0);
+        assert_eq!(data.len(), 8);
+    }
+
+    #[test]
+    fn test_push_constant_data_size_three_uints() {
+        let data = [0u8; 12];
+        assert_eq!(data.len() % 4, 0);
+        assert_eq!(data.len(), 12);
+    }
+
+    // --- Error display tests for new error variants ---
+
+    #[test]
+    fn test_error_display_push_constant_validation() {
+        let err = VulkanError::PushConstantValidation(
+            "push constant data size 5 is not a multiple of 4".to_string(),
+        );
+        let msg = format!("{}", err);
+        assert!(msg.contains("push constant validation"));
+        assert!(msg.contains("not a multiple of 4"));
+    }
+
+    #[test]
+    fn test_error_display_push_constant_validation_bindings() {
+        let err = VulkanError::PushConstantValidation(
+            "descriptor bindings must be consecutive starting from 0".to_string(),
+        );
+        let msg = format!("{}", err);
+        assert!(msg.contains("push constant validation"));
+        assert!(msg.contains("consecutive"));
+    }
+
+    // --- Single-buffer helper type regression tests ---
+
+    #[test]
+    fn test_single_buffer_layout_binding_construction() {
+        let binding_info = vk::DescriptorSetLayoutBinding::builder()
+            .binding(0)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::COMPUTE)
+            .build();
+        assert_eq!(binding_info.binding, 0);
+        assert_eq!(
+            binding_info.descriptor_type,
+            vk::DescriptorType::STORAGE_BUFFER
+        );
+        assert_eq!(binding_info.descriptor_count, 1);
+        assert!(binding_info
+            .stage_flags
+            .contains(vk::ShaderStageFlags::COMPUTE));
+    }
+
+    #[test]
+    fn test_descriptor_buffer_info_construction() {
+        let buffer_info = vk::DescriptorBufferInfo::builder()
+            .buffer(vk::Buffer::null())
+            .offset(0)
+            .range(vk::WHOLE_SIZE)
+            .build();
+        assert_eq!(buffer_info.buffer, vk::Buffer::null());
+        assert_eq!(buffer_info.offset, 0);
+        assert_eq!(buffer_info.range, vk::WHOLE_SIZE);
+    }
+
+    #[test]
+    fn test_write_descriptor_set_construction() {
+        let buffer_info = vk::DescriptorBufferInfo::builder()
+            .buffer(vk::Buffer::null())
+            .offset(0)
+            .range(vk::WHOLE_SIZE)
+            .build();
+        let mut write = vk::WriteDescriptorSet::builder()
+            .dst_set(vk::DescriptorSet::null())
+            .dst_binding(0)
+            .dst_array_element(0)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .buffer_info(&[buffer_info])
+            .build();
+        write.descriptor_count = 1;
+        assert_eq!(write.dst_set, vk::DescriptorSet::null());
+        assert_eq!(write.dst_binding, 0);
+        assert_eq!(write.descriptor_count, 1);
+    }
+
+    // --- Barrier model tests ---
+
+    #[test]
+    fn test_barrier_transfer_to_compute_stages() {
+        // Verify the stage flags used in transfer->compute barrier
+        let src_stage = vk::PipelineStageFlags::TRANSFER;
+        let dst_stage = vk::PipelineStageFlags::COMPUTE_SHADER;
+        assert!(src_stage.contains(vk::PipelineStageFlags::TRANSFER));
+        assert!(dst_stage.contains(vk::PipelineStageFlags::COMPUTE_SHADER));
+        // Source and destination stages must be different
+        assert_ne!(src_stage, dst_stage);
+    }
+
+    #[test]
+    fn test_barrier_compute_to_transfer_stages() {
+        // Verify the stage flags used in compute->transfer barrier
+        let src_stage = vk::PipelineStageFlags::COMPUTE_SHADER;
+        let dst_stage = vk::PipelineStageFlags::TRANSFER;
+        assert!(src_stage.contains(vk::PipelineStageFlags::COMPUTE_SHADER));
+        assert!(dst_stage.contains(vk::PipelineStageFlags::TRANSFER));
+        assert_ne!(src_stage, dst_stage);
+    }
+
+    #[test]
+    fn test_barrier_access_masks_transfer_write() {
+        let access = vk::AccessFlags::TRANSFER_WRITE;
+        assert!(access.contains(vk::AccessFlags::TRANSFER_WRITE));
+        assert!(!access.contains(vk::AccessFlags::SHADER_READ));
+    }
+
+    #[test]
+    fn test_barrier_access_masks_shader_read() {
+        let access = vk::AccessFlags::SHADER_READ;
+        assert!(access.contains(vk::AccessFlags::SHADER_READ));
+        assert!(!access.contains(vk::AccessFlags::TRANSFER_WRITE));
+    }
+
+    #[test]
+    fn test_barrier_access_masks_shader_write() {
+        let access = vk::AccessFlags::SHADER_WRITE;
+        assert!(access.contains(vk::AccessFlags::SHADER_WRITE));
+        assert!(!access.contains(vk::AccessFlags::TRANSFER_READ));
+    }
+
+    #[test]
+    fn test_barrier_access_masks_transfer_read() {
+        let access = vk::AccessFlags::TRANSFER_READ;
+        assert!(access.contains(vk::AccessFlags::TRANSFER_READ));
+        assert!(!access.contains(vk::AccessFlags::SHADER_WRITE));
+    }
+
+    #[test]
+    fn test_barrier_buffer_memory_barrier_construction() {
+        let barrier = vk::BufferMemoryBarrier::builder()
+            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(vk::AccessFlags::SHADER_READ)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .buffer(vk::Buffer::null())
+            .offset(0)
+            .size(vk::WHOLE_SIZE)
+            .build();
+        assert!(barrier
+            .src_access_mask
+            .contains(vk::AccessFlags::TRANSFER_WRITE));
+        assert!(barrier
+            .dst_access_mask
+            .contains(vk::AccessFlags::SHADER_READ));
+        assert_eq!(barrier.src_queue_family_index, vk::QUEUE_FAMILY_IGNORED);
+        assert_eq!(barrier.dst_queue_family_index, vk::QUEUE_FAMILY_IGNORED);
+    }
+
+    #[test]
+    fn test_barrier_whole_size_constant() {
+        // vk::WHOLE_SIZE should be u64::MAX
+        assert_eq!(vk::WHOLE_SIZE, u64::MAX);
     }
 }

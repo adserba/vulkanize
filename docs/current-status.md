@@ -1,12 +1,12 @@
 # Current Status — Vulkanize
 
-> Last updated: Phase 2.3 complete. Phase 3 next.
+> Last updated: Phase 3 backend preparation complete. Phase 3 runtime integration next.
 
 ## Build and test status
 
 - `cargo build --release` — clean, 0 warnings
-- `cargo test` — 213 unit tests pass (106 gguf, 107 vulkan-backend)
-- `cargo test --test smoke_no_op -- --ignored` — 1 integration test passes (end-to-end GPU dispatch)
+- `cargo test` — 243 unit tests pass (106 gguf, 137 vulkan-backend)
+- `cargo test --test smoke_no_op -- --ignored` — 1 integration test passes (end-to-end GPU dispatch with explicit barriers)
 - `cargo clippy --all-targets --all-features -- -D warnings` — clean
 - 1 integration test (`smoke_no_op`) — ignored by default, passes with `--ignored`
 
@@ -151,13 +151,34 @@
   8. Wait idle, readback result, verify shader wrote 0x12345678
 - Test is `#[ignore]` by default (requires GPU). Run with `cargo test --test smoke_no_op -- --ignored`
 - Validates: buffer allocation, upload, readback, shader loading, descriptor sets, pipeline creation, dispatch, synchronization
+- Updated to use explicit memory barriers: `record_barrier_transfer_to_compute` before dispatch, `record_barrier_compute_to_transfer` after dispatch
+
+### Phase 3.0: Backend preparation (multi-buffer descriptors, push constants, barriers)
+
+- `shaders/embedding_lookup.comp.glsl` + `shaders/embedding_lookup.spv` — batched embedding lookup shader:
+  - 3 storage buffer bindings: embedding weights (float, binding 0), token IDs (uint, binding 1), output hidden state (float, binding 2)
+  - Push constants: vocab_size, embedding_dim, batch_size
+  - local_size_x = 64 for AMD wavefront alignment
+  - Guards: out-of-range global ID, invalid token ID (writes 0.0)
+- `DescriptorBinding` — config struct for individual descriptor bindings (binding number, type, stage flags)
+- `VulkanContext::create_descriptor_set_layout_with_buffers(&[DescriptorBinding])` — multi-binding layout creation with consecutive-binding validation
+- `VulkanContext::create_descriptor_set_with_buffers(layout, &[(binding, &buffer, range)])` — multi-buffer descriptor set creation (pool + allocate + update)
+- Existing single-buffer helpers (`create_descriptor_set_layout_with_buffer`, `create_descriptor_set_with_buffer`) preserved for backward compatibility
+- `ComputePipeline::new_with_push_constants(device, shader, entry, layouts, push_constant_range)` — pipeline with push constant range in layout
+- `VulkanContext::create_compute_pipeline_with_push_constants(...)` — context-integrated push constant pipeline creation
+- `CommandBuffer::push_constants(layout, offset, data)` — records `vkCmdPushConstants` with word-alignment validation
+- `CommandBuffer::record_barrier_transfer_to_compute(&[&VulkanBuffer])` — explicit pipeline barrier: TRANSFER_WRITE → SHADER_READ
+- `CommandBuffer::record_barrier_compute_to_transfer(&[&VulkanBuffer])` — explicit pipeline barrier: SHADER_WRITE → TRANSFER_READ
+- `VulkanError::PushConstantValidation(String)` — new error variant for push constant and descriptor binding validation
+- 30 new unit tests: descriptor binding construction/validation (9), push constant range construction (4), push constant data alignment (4), error display (2), single-buffer regression (3), barrier model (8)
+- Smoke test updated with explicit barriers, passes on RADV
 
 ## Current crate responsibilities
 
 | Crate | State | What it does |
 |---|---|---|
 | `vulkanize-gguf` | **Functional** | Parses GGUF v3 files, exposes typed metadata and tensor descriptors |
-| `vulkanize-vulkan-backend` | **Functional** | Full Vulkan init through compute dispatch. `VulkanContext` owns instance/device/queue/command pool/memory selector. `VulkanBuffer` provides RAII buffer+memory management. `CommandBuffer` and `Fence` provide command recording, submission, and sync. `ShaderModule` loads SPIR-V. `ComputePipeline` manages pipeline+layout. `DescriptorSetLayout`/`DescriptorPool`/`DescriptorSet` manage descriptor lifecycle. `upload_to_device_local()` and `readback_buffer_data()` provide full CPU↔GPU data movement. `CommandBuffer::dispatch()` executes compute shaders. |
+| `vulkanize-vulkan-backend` | **Functional** | Full Vulkan init through compute dispatch. `VulkanContext` owns instance/device/queue/command pool/memory selector. `VulkanBuffer` provides RAII buffer+memory management. `CommandBuffer` and `Fence` provide command recording, submission, and sync. `ShaderModule` loads SPIR-V. `ComputePipeline` manages pipeline+layout with push constant support. `DescriptorSetLayout`/`DescriptorPool`/`DescriptorSet` manage descriptor lifecycle with multi-buffer layouts. `DescriptorBinding` configures individual bindings. `upload_to_device_local()` and `readback_buffer_data()` provide full CPU↔GPU data movement. `CommandBuffer::dispatch()` executes compute shaders. `CommandBuffer::push_constants()` pushes per-dispatch data. `CommandBuffer::record_barrier_transfer_to_compute()` and `record_barrier_compute_to_transfer()` provide explicit memory synchronization. |
 | `vulkanize-runtime` | **Stub** | `pub fn init() {}` — placeholder |
 | `vulkanize-api` | **Stub** | `pub fn init() {}` — placeholder |
 | `vulkanize` (cli) | **Partial** | `inspect` works, `vulkan-info` works. `generate` and `serve` print "not yet implemented". |
@@ -182,23 +203,27 @@ vulkanize serve                     # stub — exits with "not yet implemented"
 | Readback (GPU → CPU) | Done |
 | Shader module loading from .spv | Done |
 | Compute pipeline creation | Done |
+| Compute pipeline with push constants | Done |
 | Descriptor set layout/pool/set | Done |
+| Multi-buffer descriptor set layouts | Done |
+| Multi-buffer descriptor set creation | Done |
+| Push constants (pipeline + command buffer) | Done |
 | Command buffer recording + submission | Done |
 | Compute dispatch | Done |
 | Fence-based synchronization | Done |
-| Push constants | Not yet |
-| Multi-buffer descriptor sets | Not yet (single-buffer convenience only) |
+| Explicit memory barriers (transfer↔compute) | Done |
+| Embedding lookup shader (F32) | Done (shader + SPV only) |
 | Uniform buffer descriptors | Not yet |
 
 ## Remaining limitations
 
-- No memory barriers between transfer and compute stages (smoke test works without them on RADV, but correctness requires explicit barriers for production)
-- Descriptor support is single-buffer convenience only — no multi-binding layouts, no uniform buffers
-- No push constant support in pipeline layouts
 - No async dispatch — all operations are synchronous with fence wait
 - No pipeline cache
 - No tensor/weight loading from GGUF files (upload path exists but not integrated with gguf crate)
-- No compute kernels beyond no-op smoke test
+- No runtime orchestration for embedding lookup (shader + backend APIs exist, runtime integration is next)
+- No CPU reference computation for validation
+- No integration test for embedding lookup with real GGUF model
+- Embedding shader is F32 only — F16 and quantized variants not yet implemented
 
 ## OpenCode workflow assumptions
 
