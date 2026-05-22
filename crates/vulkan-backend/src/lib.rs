@@ -964,29 +964,6 @@ impl CommandBuffer {
 
         let buffer_handles: Vec<vk::Buffer> = buffers.iter().map(|b| b.buffer).collect();
 
-        let barrier = vk::BufferMemoryBarrier::builder()
-            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-            .dst_access_mask(vk::AccessFlags::SHADER_READ)
-            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .buffer(vk::Buffer::null())
-            .offset(0)
-            .size(vk::WHOLE_SIZE)
-            .build();
-
-        unsafe {
-            (*self.device).cmd_pipeline_barrier(
-                self.handle,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::PipelineStageFlags::COMPUTE_SHADER,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[barrier],
-                &[],
-            );
-        }
-
-        // Per-buffer barriers for correct per-buffer tracking
         for buf in &buffer_handles {
             let per_buffer_barrier = vk::BufferMemoryBarrier::builder()
                 .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
@@ -2232,21 +2209,27 @@ impl VulkanContext {
         let sets = pool.allocate(device, layout.handle, 1)?;
         let set = sets[0];
 
-        let descriptor_writes: Vec<vk::WriteDescriptorSet> = bindings
+        let buffer_infos: Vec<vk::DescriptorBufferInfo> = bindings
             .iter()
-            .map(|(binding, buffer, range)| {
-                let buffer_info = vk::DescriptorBufferInfo::builder()
+            .map(|(_binding, buffer, range)| {
+                vk::DescriptorBufferInfo::builder()
                     .buffer(buffer.buffer)
                     .offset(0)
                     .range(*range)
-                    .build();
+                    .build()
+            })
+            .collect();
 
+        let descriptor_writes: Vec<vk::WriteDescriptorSet> = bindings
+            .iter()
+            .enumerate()
+            .map(|(i, (binding, _buffer, _range))| {
                 let mut write = vk::WriteDescriptorSet::builder()
                     .dst_set(set)
                     .dst_binding(*binding)
                     .dst_array_element(0)
                     .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                    .buffer_info(&[buffer_info])
+                    .buffer_info(&buffer_infos[i..i + 1])
                     .build();
                 write.descriptor_count = 1;
                 write

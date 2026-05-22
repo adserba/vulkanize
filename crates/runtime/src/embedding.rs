@@ -67,11 +67,7 @@ fn f16_to_f32(bits: u32) -> f32 {
         }
     } else if exp == 31 {
         // Inf or NaN
-        f32::from_bits(
-            (sign << 31)
-                | (0xFFu32 << 23)
-                | if frac != 0 { 0x0040_0000 } else { 0 },
-        )
+        f32::from_bits((sign << 31) | (0xFFu32 << 23) | if frac != 0 { 0x0040_0000 } else { 0 })
     } else {
         // Normal
         let e = (exp - 15 + 127) as u32;

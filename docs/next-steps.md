@@ -1,106 +1,65 @@
 # Next Steps — Vulkanize
 
-> Immediate engineering milestones: Phase 3 — first real kernel (embedding lookup).
+> Immediate engineering milestones: Phase 3 — runtime orchestration for embedding lookup.
 
 ## AI workflow: reconstructing project state
 
 Before making changes, a new session should:
 
-1. Read `docs/project-vision.md` — understand the goal and constraints
-2. Read `docs/current-status.md` — know what is built and what is not
-3. Read `docs/roadmap.md` — find the current phase and what is next
-4. Read `docs/phase-3-plan.md` — detailed Phase 3 implementation plan
-5. Read `docs/design.md` — review crate contracts and architecture
-6. Scan `crates/*/src/lib.rs` and `crates/cli/src/main.rs` — verify code matches documentation
-7. Run `cargo build --release && cargo test` — confirm the baseline is green
+1. Read `docs/current-status.md` — know what is built and what is not
+2. Read `docs/roadmap.md` — find the current phase and what is next
+3. Read `docs/phase-3-plan.md` — detailed Phase 3 plan and results
+4. Read `docs/design.md` — review crate contracts and architecture
+5. Run `cargo build --release && cargo test` — confirm the baseline is green
 
-Then work on the next roadmap item. After completing it, update `docs/roadmap.md` and `docs/current-status.md`.
+Then work on the next roadmap item. After completing it, update `docs/roadmap.md`, `docs/current-status.md`, and `docs/phase-3-plan.md`.
+
+**Session discipline:** One OpenCode session = one narrow milestone. Do not attempt multiple phases in a single session. Use `docs/` as the primary source of truth — avoid re-reading large `lib.rs` files unless the implementation requires exact API signatures.
 
 ## Phase 3: First kernel — embedding lookup
 
-Phase 2.3 is complete. The backend can allocate buffers, upload data, load shaders, create pipelines with descriptor sets, dispatch compute work, and read back results. The smoke test proves end-to-end GPU execution.
+Phase 2.3 and Phase 3.0 are complete. The backend can allocate buffers, upload data, load shaders, create pipelines with descriptor sets and push constants, dispatch compute work with explicit memory barriers, and read back results. The smoke test proves end-to-end GPU execution. Phase 3.2 validates the embedding lookup shader with synthetic F32 data on real hardware.
 
-Phase 3 implements the first real inference kernel: embedding lookup.
+### What is done (Phase 3.0 + 3.2)
 
-### What embedding lookup does
+- Embedding lookup shader: batched F32, 3-buffer descriptor layout, push constants, validated on RADV
+- Backend: multi-buffer descriptors, push constants, explicit transfer/compute barriers
+- CPU reference: `embedding_lookup_f32()`, `compare_f32()` in `runtime::embedding`
+- GPU smoke test: synthetic F32 embeddings, GPU output matches CPU reference within 1e-5
 
-Given a token ID and the model's embedding table (shape: `[vocab_size, hidden_dim]`), the kernel reads one row from the table and writes it to the output buffer. This is the first operation in the transformer forward pass.
+### What remains
 
-### Implementation order
+#### Next: Runtime embedding orchestration
 
-1. **Shader** — Write `embedding_lookup.comp.glsl`
-2. **Backend extensions** — Multi-buffer descriptors, push constants
-3. **Runtime** — GGUF tensor identification, upload, dispatch orchestration
-4. **CPU reference** — Simple CPU embedding lookup for validation
-5. **Integration test** — End-to-end with real GGUF model
+The `runtime` crate needs to orchestrate the full embedding lookup pipeline:
 
-### Dtype strategy
+1. **GGUF tensor upload integration** — use `gguf::read_tensor_bytes()` + `VulkanContext::upload_to_device_local()` to load a real model's embedding tensor to GPU
+2. **Dispatch orchestration** — allocate output buffer, build descriptor set, push constants, dispatch, readback
+3. **CPU vs GPU validation path** — run CPU reference on same tensor data, compare with `compare_f32()`
 
-- **F32 first** — simplest shader, easiest validation, establishes the pipeline
+#### Implementation order for remaining Phase 3
+
+1. **Runtime: GGUF tensor upload** — `ModelLoader` or equivalent that parses GGUF, finds embedding tensor, uploads to GPU
+2. **Runtime: embedding dispatch** — wires up backend APIs (descriptor sets, push constants, barriers, dispatch) into a single `embedding_lookup()` call
+3. **Runtime: validation** — CPU reference comparison on real GGUF tensor data
+4. **Integration test** — end-to-end with small real GGUF model (F32)
+
+#### Synthetic tests before real models
+
+- The synthetic smoke test in `vulkan-backend/tests/embedding_lookup.rs` validates the GPU path in isolation
+- Before running against a real GGUF model, add a runtime-level synthetic test that exercises the same orchestration code path with synthetic data
+- Only then integrate with `gguf::read_tensor_bytes()` for real-model validation
+
+#### Dtype strategy
+
+- **F32 first** — simplest shader, easiest validation, establishes the pipeline (DONE)
 - **F16 next** — requires `float16.spv` capability check + type conversion in shader or pre-conversion on upload
 - **Quantized embeddings deferred** — Q4_0/Q8_0 dequantization adds significant shader complexity; tackle after F32/F16 kernels for the full transformer block are working
-
-### Backend APIs needed
-
-The current single-buffer descriptor convenience (`create_descriptor_set_layout_with_buffer`, `create_descriptor_set_with_buffer`) is insufficient. Phase 3 needs:
-
-- **Multi-binding descriptor set layout** — at least 2 bindings: one for the weight buffer (read-only), one for the output buffer (read-write)
-- **Uniform buffer or push constants** — to pass shape parameters (`vocab_size`, `hidden_dim`, `token_id`) to the shader
-- **Push constants preferred** — simpler than uniform buffers for small per-dispatch config; no extra buffer allocation needed
-
-### Shader binding layout (proposed)
-
-```glsl
-layout(set = 0, binding = 0, std430) readonly buffer EmbeddingTable {
-    float weights[];  // [vocab_size][hidden_dim], row-major
-} embedding_table;
-
-layout(set = 0, binding = 1, std430) buffer OutputBuffer {
-    float output[];   // [hidden_dim]
-} output_buf;
-
-layout(push_constant) uniform PushConstants {
-    uint vocab_size;
-    uint hidden_dim;
-    uint token_id;
-} params;
-```
-
-### CPU reference path
-
-Implement a trivial CPU embedding lookup in `runtime` crate:
-
-```rust
-fn embedding_lookup_cpu(weights: &[f32], vocab_size: usize, hidden_dim: usize, token_id: usize) -> Vec<f32> {
-    let start = token_id * hidden_dim;
-    weights[start..start + hidden_dim].to_vec()
-}
-```
-
-Use this to validate GPU output. Compare with tolerance (1e-5 for F32).
-
-### GGUF tensor identification
-
-The embedding tensor is identified by name pattern:
-- `token_embd.weight` — standard llama-family naming
-- Shape: `[hidden_dim, vocab_size]` (note: GGUF stores column-major, so dimensions are `[rows, cols]` = `[hidden_dim, vocab_size]`)
-
-The GGUF parser already extracts this via `extract_model_arch()`. The runtime needs to:
-1. Find the tensor by name in the parsed tensor list
-2. Read its data from the GGUF file at the recorded offset
-3. Upload to a device-local buffer
-
-### Validation approach
-
-- **GPU vs CPU**: dispatch kernel, read back result, compare with CPU reference using tolerance-based comparison (not exact equality — FP differences are expected)
-- **Tolerance**: 1e-5 for F32, consider 1e-2 for F16
-- **Test model**: use a small F32 GGUF for initial testing (e.g., manually converted small model)
 
 ### What not to do yet
 
 - Do not implement quantized embedding dequantization
-- Do not implement batch embedding lookup (single token first)
-- Do not implement the full forward pass before embedding lookup is verified
+- Do not implement the full forward pass before embedding lookup produces correct results with a real model
 - Do not add async dispatch or pipeline caching
 - Do not implement the tokenizer — use hardcoded token IDs for testing
 
@@ -108,6 +67,9 @@ The GGUF parser already extracts this via `extract_model_arch()`. The runtime ne
 
 - **Vulkan shader complexity.** Compute shaders for attention and FFN are substantially more complex than CPU code. Expect iteration on workgroup sizing, shared memory usage, and memory access patterns.
 - **AMD driver differences.** RADV (Mesa) and AMDVLK may behave differently. Test on the target driver early.
+- **RADV-specific Vulkan pitfalls** (discovered Phase 3.2):
+  - NULL buffer handles in `vkCmdPipelineBarrier` cause GPUVM faults — always pass actual buffer handles
+  - `DescriptorBufferInfo` holds raw `vk::Buffer` handles — ensure `VulkanBuffer` RAII wrappers outlive descriptor set updates
 - **Quantization kernels.** Dequantizing Q4_0/Q8_0 in shaders adds significant complexity. Start with FP16/FP32 models.
 - **Memory pressure.** Large models need efficient weight loading. Memory-mapping + single-upload is the plan, but VRAM-constrained systems will need attention.
 - **Numerical correctness.** Floating-point differences between CPU and GPU are expected. Need tolerance-based comparison, not exact equality.
@@ -121,3 +83,7 @@ The GGUF parser already extracts this via `extract_model_arch()`. The runtime ne
 - Do not optimize kernels before they produce correct results
 - Do not add multi-GPU or tensor parallelism before single-GPU is working
 - Do not write benchmarks before numerical correctness is verified
+
+## Future housekeeping
+
+- **Modularize `vulkan-backend/lib.rs`** — currently a single large file. After Phase 3 is complete, split into modules: `buffer.rs`, `command.rs`, `descriptor.rs`, `pipeline.rs`, `shader.rs`, `context.rs`, `error.rs`. Do this as a standalone refactoring commit, not mixed with feature work.

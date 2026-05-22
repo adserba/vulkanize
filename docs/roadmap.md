@@ -60,15 +60,28 @@ See also: `docs/current-status.md` (what is built), `docs/project-vision.md` (wh
 
 ## Phase 3: First kernel — embedding lookup
 
-- [ ] Write `embedding_lookup.comp.glsl` shader (F32, then F16)
-- [ ] Compile to SPIR-V, ship as `.spv` in `shaders/`
-- [ ] Backend: extend descriptor support for multi-buffer layouts (input + output bindings)
-- [ ] Backend: add push constant support to pipeline layouts
+### Done
+
+- [x] Write `embedding_lookup.comp.glsl` shader (F32, batched)
+- [x] Compile to SPIR-V, ship as `.spv` in `shaders/`
+- [x] Backend: extend descriptor support for multi-buffer layouts (3 bindings: weights, token IDs, output)
+- [x] Backend: add push constant support to pipeline layouts (12-byte struct: vocab_size, embedding_dim, batch_size)
+- [x] Backend: explicit transfer↔compute memory barriers
+- [x] GPU embedding lookup smoke test (synthetic F32, validated on AMD Radeon AI PRO R9700 / RADV)
+- [x] CPU reference embedding lookup + tolerance-based comparison
+
+### Remaining
+
 - [ ] Runtime: parse GGUF, identify embedding tensor, upload to device-local buffer
 - [ ] Runtime: allocate output buffer, create descriptor set with weight + output bindings
-- [ ] Dispatch embedding lookup for a single token
+- [ ] Runtime: dispatch embedding lookup for a single token from real GGUF model
 - [ ] Read back and verify against CPU reference computation
 - [ ] Integration test: end-to-end embedding lookup with real GGUF model
+
+### Deferred to Phase 3.5+
+
+- [ ] F16 embedding lookup (requires float16 Vulkan capability check)
+- [ ] Quantized embedding dequantization (Q4_0, Q8_0) — deferred to Phase 8
 
 ## Phase 4: Transformer block
 

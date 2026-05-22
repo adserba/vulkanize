@@ -8,3 +8,4 @@ ash = "0.37"
 
 [dev-dependencies]
 ash = "0.37"
+vulkanize-runtime = { path = "../runtime" }

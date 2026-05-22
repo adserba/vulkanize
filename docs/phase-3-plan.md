@@ -236,16 +236,16 @@ Verify `glslangValidator` is installed. If not: `sudo apt install glslang-tools`
 
 ## Validation checklist
 
-- [ ] Shader compiles to SPIR-V without warnings
-- [ ] Pipeline creates with push constants + 2 descriptor bindings
-- [ ] Descriptor set updates with both buffer bindings
-- [ ] Push constants are set correctly before dispatch
-- [ ] Dispatch completes without Vulkan errors
-- [ ] Readback returns correct number of f32 values
-- [ ] GPU output matches CPU reference within tolerance
-- [ ] Integration test passes with `--ignored`
-- [ ] `cargo test` still passes (all unit tests)
-- [ ] `cargo clippy` is clean
+- [x] Shader compiles to SPIR-V without warnings
+- [x] Pipeline creates with push constants + 3 descriptor bindings (weights, token IDs, output)
+- [x] Descriptor set updates with all buffer bindings
+- [x] Push constants are set correctly before dispatch
+- [x] Dispatch completes without Vulkan errors
+- [x] Readback returns correct number of f32 values
+- [x] GPU output matches CPU reference within tolerance
+- [x] Integration test passes with `--ignored`
+- [x] `cargo test` still passes (all 312 unit tests)
+- [x] `cargo clippy` is clean
 
 ## Architectural notes
 
@@ -253,3 +253,65 @@ Verify `glslangValidator` is installed. If not: `sudo apt install glslang-tools`
 - **Descriptor set layout binding flags:** `VK_DESCRIPTOR_BINDING_STORAGE_BUFFER_UPDATE_AFTER_BIND_BIT` is not needed for static bindings. Keep it simple.
 - **Push constant size limit:** Vulkan guarantees at least 128 bytes of push constant space. Our 8-byte struct is well within limits.
 - **GGUF column-major:** GGUF stores tensors in column-major order. For the embedding table `[hidden_dim, vocab_size]`, element `(row, col)` is at offset `row + col * hidden_dim`. This means token `col`'s embedding starts at `col * hidden_dim` and spans `hidden_dim` elements — which is what the shader computes.
+
+## Phase 3.2 results
+
+### Smoke test: PASSED
+
+- **Hardware:** AMD Radeon AI PRO R9700 (RADV driver)
+- **Test:** `crates/vulkan-backend/tests/embedding_lookup.rs::smoke_embedding_lookup_f32`
+- **Configuration:** vocab=4, dim=64, batch=1, token_id=2, 4096-byte buffers
+- **Result:** GPU output matches CPU reference (`embedding_lookup_f32`) within 1e-5 tolerance across all 64 elements
+
+### Validated command sequence
+
+```
+upload_to_device_local(weights)
+upload_to_device_local(token_ids)
+allocate_command_buffer → begin
+  → record_barrier_transfer_to_compute(weight_buf, token_buf)
+  → bind_compute_pipeline
+  → push_constants(vocab_size, embedding_dim, batch_size)
+  → bind_descriptor_sets(3 bindings)
+  → dispatch(1, 1, 1)
+  → record_barrier_compute_to_transfer(output_buf)
+end → submit_and_wait
+wait_idle → readback_buffer_data(output_buf)
+```
+
+### Validated descriptor layout
+
+| Binding | Type | Buffer | Range |
+|---|---|---|---|
+| 0 | STORAGE_BUFFER (readonly) | weights | total_weights bytes |
+| 1 | STORAGE_BUFFER (readonly) | token IDs | 4 bytes |
+| 2 | STORAGE_BUFFER (readwrite) | output | embedding_dim * 4 bytes |
+
+### Validated push constant layout (12 bytes)
+
+| Offset | Field | Type |
+|---|---|---|
+| 0 | vocab_size | u32 |
+| 4 | embedding_dim | u32 |
+| 8 | batch_size | u32 |
+
+### Bugs discovered and fixed
+
+1. **DescriptorBufferInfo lifetime bug**: `vk::DescriptorBufferInfo` holds a `vk::Buffer` handle, not a reference. If the `VulkanBuffer` RAII wrapper is dropped before the descriptor set update, the handle dangles. **Fix:** ensure `VulkanBuffer` instances outlive the descriptor set update call — hold references through the submit scope.
+
+2. **NULL buffer barrier → GPUVM fault**: Passing `vk::NULL_HANDLE` as the buffer in `vkCmdPipelineBarrier` caused a GPUVM page fault on RADV. **Fix:** always pass the actual buffer handle in barrier structs. Never use NULL handles in `vk::BufferMemoryBarrier2` on RADV.
+
+### Lessons learned
+
+- **Buffer alignment matters:** 4096-byte buffers avoid GPU memory controller alignment issues on RADV. Smaller buffers may work but are less portable.
+- **Explicit barriers are mandatory:** The original smoke test worked without barriers on RADV by accident. Production kernels must use explicit `transfer→compute` and `compute→transfer` barriers.
+- **Synthetic data first:** Using synthetic F32 embeddings (sequential values 0..N) makes debugging trivial — you can visually inspect the output array for correctness without needing a real model.
+- **Shader evolved from plan:** The original plan had a single-token shader with 2 bindings. The implemented version is batched with 3 bindings (token IDs as a buffer, not push constant). This is more flexible and supports future batch prefill.
+- **Push constants vs buffer for token IDs:** Token IDs are passed via a storage buffer (binding 1) rather than push constants, allowing variable-length token sequences without push constant size limits.
+
+### What remains (Phase 3.3+)
+
+- Runtime orchestration: `ModelLoader` with GGUF tensor upload
+- Real-model integration test: end-to-end embedding lookup with F32 GGUF
+- F16 embedding variant (Phase 3.5)
+- Modularization of `vulkan-backend/lib.rs` (post-Phase 3 housekeeping)

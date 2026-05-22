@@ -1,14 +1,15 @@
 # Current Status — Vulkanize
 
-> Last updated: Phase 3 GGUF helpers + CPU reference complete. Phase 3 runtime integration next.
+> Last updated: Phase 3.2 GPU embedding lookup smoke test complete. Phase 3 runtime orchestration next.
 
 ## Build and test status
 
 - `cargo build --release` — clean, 0 warnings
 - `cargo test` — 312 unit tests pass (154 gguf, 137 vulkan-backend, 21 runtime)
-- `cargo test --test smoke_no_op -- --ignored` — 1 integration test passes (end-to-end GPU dispatch with explicit barriers)
+- `cargo test --test smoke_no_op -- --ignored` — passes (end-to-end GPU dispatch with explicit barriers)
+- `cargo test --test embedding_lookup -- --ignored` — passes (GPU embedding lookup, synthetic F32, validated on AMD Radeon AI PRO R9700 / RADV)
 - `cargo clippy --all-targets --all-features -- -D warnings` — clean
-- 1 integration test (`smoke_no_op`) — ignored by default, passes with `--ignored`
+- 2 integration tests — both ignored by default, pass with `--ignored`
 
 ## Completed milestones
 
@@ -193,6 +194,28 @@
 - 30 new unit tests: descriptor binding construction/validation (9), push constant range construction (4), push constant data alignment (4), error display (2), single-buffer regression (3), barrier model (8)
 - Smoke test updated with explicit barriers, passes on RADV
 
+### Phase 3.2: GPU embedding lookup smoke test
+
+- `crates/vulkan-backend/tests/embedding_lookup.rs` — end-to-end GPU embedding lookup integration test:
+  1. Create VulkanContext
+  2. Build synthetic F32 embedding table (vocab=4, dim=64, values 0.0..255.0)
+  3. Create 3 device-local buffers (weights, token IDs, output), 4096 bytes each
+  4. Upload weights + token IDs via `upload_to_device_local`
+  5. Load `embedding_lookup.spv` shader
+  6. Create 3-binding descriptor layout + descriptor set
+  7. Create pipeline with 12-byte push constant range (vocab_size, embedding_dim, batch_size)
+  8. Record command buffer: begin → transfer→compute barrier → bind pipeline → push constants → bind descriptors → dispatch(1,1,1) → compute→transfer barrier → end → submit_and_wait
+  9. Wait idle, readback output, convert to f32
+  10. Compare GPU output vs CPU reference (`embedding_lookup_f32`) with 1e-5 tolerance
+- Validated on AMD Radeon AI PRO R9700 (RADV driver)
+- Confirms: push constants, multi-buffer descriptors, explicit transfer/compute barriers, shader dispatch, readback, numerical correctness for synthetic F32 embeddings
+- `#[ignore]` by default. Run with `cargo test --test embedding_lookup -- --ignored`
+
+#### Vulkan bugs discovered during Phase 3.2
+
+- **DescriptorBufferInfo lifetime bug**: `vk::DescriptorBufferInfo` holds a `vk::Buffer` handle, not a reference. If the `VulkanBuffer` RAII wrapper is dropped before the descriptor set update, the handle becomes dangling. Fix: ensure `VulkanBuffer` instances outlive the descriptor set update call (hold references through the `execute_immediate` / submit scope).
+- **NULL buffer in pipeline barrier → GPUVM fault**: Passing `vk::NULL_HANDLE` as the buffer in `vkCmdPipelineBarrier`'s `vk::ImageMemoryBarrier2` / `vk::BufferMemoryBarrier2` caused a GPUVM page fault on RADV. Fix: always pass the actual buffer handle in the barrier, even when the barrier only needs stage/sync flags. Never use NULL handles in barrier structs on RADV.
+
 ## Current crate responsibilities
 
 | Crate | State | What it does |
@@ -232,7 +255,8 @@ vulkanize serve                     # stub — exits with "not yet implemented"
 | Compute dispatch | Done |
 | Fence-based synchronization | Done |
 | Explicit memory barriers (transfer↔compute) | Done |
-| Embedding lookup shader (F32) | Done (shader + SPV only) |
+| Embedding lookup shader (F32) | Done (shader + SPV + GPU smoke test) |
+| Embedding lookup GPU smoke test (synthetic F32) | Done (validated on RADV) |
 | GGUF tensor byte size calculation | Done |
 | GGUF token embedding lookup | Done |
 | GGUF raw tensor byte reading | Done |
@@ -245,8 +269,8 @@ vulkanize serve                     # stub — exits with "not yet implemented"
 
 - No async dispatch — all operations are synchronous with fence wait
 - No pipeline cache
-- No runtime orchestration for embedding lookup (shader + backend APIs + GGUF helpers + CPU reference exist, runtime integration is next)
-- No integration test for embedding lookup with real GGUF model
+- No runtime orchestration for embedding lookup (shader + backend APIs + GGUF helpers + CPU reference + synthetic GPU test exist, runtime integration is next)
+- No integration test for embedding lookup with real GGUF model (synthetic test passes; real-model test requires GGUF tensor upload in runtime)
 - Embedding shader is F32 only — F16 and quantized variants not yet implemented
 - `read_tensor_bytes()` requires `std::fs::File` — memory-mapped loading not yet implemented
 

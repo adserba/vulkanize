@@ -64,9 +64,17 @@ vulkanize serve --host 127.0.0.1 --port 8000  # OpenAI API server
 | `docs/design.md` | Architectural decisions, crate contracts |
 | `docs/roadmap.md` | Phase order, what's in scope next |
 | `docs/next-steps.md` | Immediate milestones, risks, workflow |
+| `docs/phase-3-plan.md` | Phase 3 results, bugs, validated patterns |
 | `docs/gguf-format-notes.md` | GGUF parsing details, tensor layout quirks |
 | `docs/amd-vulkan-backend.md` | Vulkan device selection, queue families, memory types on AMD |
 | `docs/server-mode.md` | OpenAI API compatibility requirements |
+
+## Session workflow
+
+- **One session = one narrow milestone.** Do not attempt multiple phases or unrelated tasks in a single session.
+- **Use `docs/` as the primary source of truth.** Avoid re-reading large `lib.rs` files unless the implementation requires exact API signatures.
+- **Update docs after meaningful milestones.** When a test passes or a feature lands, update `docs/current-status.md`, `docs/roadmap.md`, and the relevant phase plan before committing.
+- **Commit after each completed milestone.** Small, reviewable commits. Reference `docs/` in commit messages when a decision is documented there.
 
 ## Things to never do
 
