@@ -5,3 +5,6 @@ edition = "2021"
 
 [dependencies]
 ash = "0.37"
+
+[dev-dependencies]
+ash = "0.37"

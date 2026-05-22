@@ -65,6 +65,14 @@ pub enum VulkanError {
     ComputePipelineCreation(vk::Result),
     /// Entry point name contains a null byte or is otherwise invalid for CString.
     InvalidEntryPoint(String),
+    /// Failed to create a descriptor set layout.
+    DescriptorSetLayoutCreation(vk::Result),
+    /// Failed to create a descriptor pool.
+    DescriptorPoolCreation(vk::Result),
+    /// Failed to allocate a descriptor set from the pool.
+    DescriptorSetAllocation(vk::Result),
+    /// Command buffer was not in the recording state when a command was recorded.
+    CommandBufferNotRecording,
 }
 
 impl fmt::Display for VulkanError {
@@ -128,6 +136,18 @@ impl fmt::Display for VulkanError {
             }
             VulkanError::InvalidEntryPoint(msg) => {
                 write!(f, "invalid entry point name: {}", msg)
+            }
+            VulkanError::DescriptorSetLayoutCreation(res) => {
+                write!(f, "descriptor set layout creation failed: {:?}", res)
+            }
+            VulkanError::DescriptorPoolCreation(res) => {
+                write!(f, "descriptor pool creation failed: {:?}", res)
+            }
+            VulkanError::DescriptorSetAllocation(res) => {
+                write!(f, "descriptor set allocation failed: {:?}", res)
+            }
+            VulkanError::CommandBufferNotRecording => {
+                write!(f, "command buffer is not in the recording state")
             }
         }
     }
@@ -358,8 +378,9 @@ impl VulkanBuffer {
 
     /// Write data into the buffer at offset 0.
     ///
-    /// Maps the buffer, copies the data, and unmaps it.
-    /// The buffer must have `HOST_VISIBLE` memory.
+    /// If the buffer is already mapped, writes directly through the
+    /// existing mapping without unmap/remap. Otherwise maps, writes,
+    /// and unmaps. The buffer must have `HOST_VISIBLE` memory.
     pub fn write_data(&mut self, data: &[u8]) -> Result<(), VulkanError> {
         if data.len() > self.size as usize {
             return Err(VulkanError::MemoryMapping(
@@ -367,18 +388,28 @@ impl VulkanBuffer {
             ));
         }
 
-        let ptr = self.map()?;
+        let was_mapped = self.mapped_ptr.is_some();
+        let ptr = if was_mapped {
+            self.mapped_ptr.unwrap()
+        } else {
+            self.map()?
+        };
+
         unsafe {
             std::slice::from_raw_parts_mut(ptr, data.len()).copy_from_slice(data);
         }
-        self.unmap()?;
+
+        if !was_mapped {
+            self.unmap()?;
+        }
         Ok(())
     }
 
     /// Write data into the buffer at a specific byte offset.
     ///
-    /// Maps the buffer, copies the data at the given offset, and unmaps it.
-    /// The buffer must have `HOST_VISIBLE` memory.
+    /// If the buffer is already mapped, writes directly through the
+    /// existing mapping without unmap/remap. Otherwise maps, writes,
+    /// and unmaps. The buffer must have `HOST_VISIBLE` memory.
     ///
     /// # Errors
     ///
@@ -397,12 +428,21 @@ impl VulkanBuffer {
             ));
         }
 
-        let ptr = self.map()?;
+        let was_mapped = self.mapped_ptr.is_some();
+        let ptr = if was_mapped {
+            self.mapped_ptr.unwrap()
+        } else {
+            self.map()?
+        };
+
         unsafe {
             std::slice::from_raw_parts_mut(ptr.add(offset as usize), data.len())
                 .copy_from_slice(data);
         }
-        self.unmap()?;
+
+        if !was_mapped {
+            self.unmap()?;
+        }
         Ok(())
     }
 
@@ -637,6 +677,11 @@ impl fmt::Debug for CommandBuffer {
 }
 
 impl CommandBuffer {
+    /// Returns the Vulkan command buffer handle for low-level API calls.
+    pub fn handle(&self) -> vk::CommandBuffer {
+        self.handle
+    }
+
     /// Begin recording with `ONE_TIME_SUBMIT` flag.
     ///
     /// Hint to the implementation that this command buffer will be
@@ -778,6 +823,81 @@ impl CommandBuffer {
 
         Ok(())
     }
+
+    /// Bind a compute pipeline to this command buffer.
+    ///
+    /// # Panics
+    ///
+    /// Returns an error if the command buffer is not currently recording.
+    pub fn bind_compute_pipeline(&mut self, pipeline: &ComputePipeline) -> Result<(), VulkanError> {
+        if !self.is_recording {
+            return Err(VulkanError::CommandBufferNotRecording);
+        }
+
+        unsafe {
+            (*self.device).cmd_bind_pipeline(
+                self.handle,
+                vk::PipelineBindPoint::COMPUTE,
+                pipeline.pipeline,
+            );
+        }
+        Ok(())
+    }
+
+    /// Bind descriptor sets to this command buffer.
+    ///
+    /// # Arguments
+    ///
+    /// * `layout` - The pipeline layout the descriptor sets were allocated for
+    /// * `set_offset` - Index of the first descriptor set to bind
+    /// * `descriptor_sets` - Slice of descriptor set handles to bind
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the command buffer is not currently recording.
+    pub fn bind_descriptor_sets(
+        &mut self,
+        layout: vk::PipelineLayout,
+        set_offset: u32,
+        descriptor_sets: &[vk::DescriptorSet],
+    ) -> Result<(), VulkanError> {
+        if !self.is_recording {
+            return Err(VulkanError::CommandBufferNotRecording);
+        }
+
+        unsafe {
+            (*self.device).cmd_bind_descriptor_sets(
+                self.handle,
+                vk::PipelineBindPoint::COMPUTE,
+                layout,
+                set_offset,
+                descriptor_sets,
+                &[],
+            );
+        }
+        Ok(())
+    }
+
+    /// Dispatch a compute shader with the given workgroup dimensions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the command buffer is not currently recording.
+    pub fn dispatch(
+        &mut self,
+        group_count_x: u32,
+        group_count_y: u32,
+        group_count_z: u32,
+    ) -> Result<(), VulkanError> {
+        if !self.is_recording {
+            return Err(VulkanError::CommandBufferNotRecording);
+        }
+
+        unsafe {
+            (*self.device).cmd_dispatch(self.handle, group_count_x, group_count_y, group_count_z);
+        }
+        Ok(())
+    }
 }
 
 impl Drop for CommandBuffer {
@@ -788,6 +908,231 @@ impl Drop for CommandBuffer {
         let device = unsafe { &*self.device };
         unsafe {
             device.free_command_buffers(self.command_pool, [self.handle].as_slice());
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DescriptorSetLayout — owns a VkDescriptorSetLayout
+// ---------------------------------------------------------------------------
+
+/// A Vulkan descriptor set layout defining the bindings available
+/// in a descriptor set.
+///
+/// This is the minimal descriptor abstraction needed to run compute
+/// shaders with buffer bindings. It owns the `VkDescriptorSetLayout`
+/// handle and ensures correct cleanup on drop.
+///
+/// # Lifecycle
+///
+/// 1. Create via `VulkanContext::create_descriptor_set_layout_with_buffer()`
+/// 2. Pass to `ComputePipeline::new_with_layouts()` for pipeline layout creation
+/// 3. Pass to `VulkanContext::create_descriptor_set_with_buffer()` for allocation
+/// 4. `Drop` destroys the layout
+pub struct DescriptorSetLayout {
+    device: *const ash::Device,
+    /// The Vulkan descriptor set layout handle.
+    pub handle: vk::DescriptorSetLayout,
+}
+
+impl fmt::Debug for DescriptorSetLayout {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DescriptorSetLayout")
+            .field("handle", &self.handle)
+            .finish()
+    }
+}
+
+impl DescriptorSetLayout {
+    pub fn handle(&self) -> vk::DescriptorSetLayout {
+        self.handle
+    }
+}
+
+impl Drop for DescriptorSetLayout {
+    fn drop(&mut self) {
+        if self.device.is_null() {
+            return;
+        }
+        let device = unsafe { &*self.device };
+        unsafe {
+            device.destroy_descriptor_set_layout(self.handle, None);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DescriptorPool — owns a VkDescriptorPool
+// ---------------------------------------------------------------------------
+
+/// A Vulkan descriptor pool for allocating descriptor sets.
+///
+/// Descriptor sets are allocated from a pool and must be freed
+/// before the pool is destroyed. This type owns the `VkDescriptorPool`
+/// handle and ensures correct cleanup on drop.
+///
+/// # Lifecycle
+///
+/// 1. Create via `DescriptorPool::create()` with a max set count
+/// 2. Allocate descriptor sets via `device.allocate_descriptor_sets()`
+/// 3. Update descriptor sets via `device.update_descriptor_sets()`
+/// 4. Free all descriptor sets via `device.free_descriptor_sets()`
+/// 5. `Drop` destroys the pool
+pub struct DescriptorPool {
+    device: *const ash::Device,
+    /// The Vulkan descriptor pool handle.
+    pub handle: vk::DescriptorPool,
+}
+
+impl fmt::Debug for DescriptorPool {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DescriptorPool")
+            .field("handle", &self.handle)
+            .finish()
+    }
+}
+
+impl DescriptorPool {
+    /// Create a new descriptor pool with the given maximum number of
+    /// descriptor sets and descriptor type counts.
+    ///
+    /// # Arguments
+    ///
+    /// * `device` - The Vulkan device
+    /// * `max_sets` - Maximum number of descriptor sets that can be allocated
+    /// * `descriptor_counts` - Pairs of (descriptor type, count) specifying
+    ///   how many descriptors of each type the pool can hold
+    pub fn create(
+        device: &ash::Device,
+        max_sets: u32,
+        descriptor_counts: &[(vk::DescriptorType, u32)],
+    ) -> Result<Self, VulkanError> {
+        let pool_sizes: Vec<vk::DescriptorPoolSize> = descriptor_counts
+            .iter()
+            .map(|(ty, count)| {
+                vk::DescriptorPoolSize::builder()
+                    .ty(*ty)
+                    .descriptor_count(*count)
+                    .build()
+            })
+            .collect();
+
+        let create_info = vk::DescriptorPoolCreateInfo::builder()
+            .max_sets(max_sets)
+            .pool_sizes(&pool_sizes);
+
+        let handle = unsafe {
+            device
+                .create_descriptor_pool(&create_info, None)
+                .map_err(VulkanError::DescriptorPoolCreation)?
+        };
+
+        Ok(Self {
+            device: device as *const ash::Device,
+            handle,
+        })
+    }
+
+    /// Allocate descriptor sets from this pool.
+    ///
+    /// # Arguments
+    ///
+    /// * `device` - The Vulkan device (for the API call)
+    /// * `layout` - The descriptor set layout to use for each allocated set
+    /// * `count` - Number of descriptor sets to allocate
+    pub fn allocate(
+        &self,
+        device: &ash::Device,
+        layout: vk::DescriptorSetLayout,
+        count: u32,
+    ) -> Result<Vec<vk::DescriptorSet>, VulkanError> {
+        let layouts: Vec<vk::DescriptorSetLayout> =
+            std::iter::repeat_n(layout, count as usize).collect();
+
+        let alloc_info = vk::DescriptorSetAllocateInfo::builder()
+            .descriptor_pool(self.handle)
+            .set_layouts(&layouts);
+
+        unsafe {
+            device
+                .allocate_descriptor_sets(&alloc_info)
+                .map_err(VulkanError::DescriptorSetAllocation)
+        }
+    }
+
+    /// Free all descriptor sets back to the pool.
+    pub fn free_all(
+        &self,
+        device: &ash::Device,
+        sets: &[vk::DescriptorSet],
+    ) -> Result<(), VulkanError> {
+        unsafe {
+            device
+                .free_descriptor_sets(self.handle, sets)
+                .map_err(VulkanError::DescriptorSetAllocation)?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for DescriptorPool {
+    fn drop(&mut self) {
+        if self.device.is_null() {
+            return;
+        }
+        let device = unsafe { &*self.device };
+        unsafe {
+            device.destroy_descriptor_pool(self.handle, None);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DescriptorSet — owns a VkDescriptorSet
+// ---------------------------------------------------------------------------
+
+/// A Vulkan descriptor set containing bindings for shader resources.
+///
+/// This is a minimal wrapper that owns the descriptor set handle.
+/// Descriptor sets are allocated from a `DescriptorPool` and must
+/// be freed before the pool is destroyed.
+///
+/// # Lifecycle
+///
+/// 1. Allocate via `DescriptorPool::allocate()` or
+///    `VulkanContext::create_descriptor_set_with_buffer()`
+/// 2. Update with `device.update_descriptor_sets()`
+/// 3. Bind in a command buffer with `vkCmdBindDescriptorSets`
+/// 4. Free back to pool or let pool clean up on drop
+pub struct DescriptorSet {
+    device: *const ash::Device,
+    pool: Box<DescriptorPool>,
+    /// The Vulkan descriptor set handle.
+    pub handle: vk::DescriptorSet,
+}
+
+impl fmt::Debug for DescriptorSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DescriptorSet")
+            .field("handle", &self.handle)
+            .finish()
+    }
+}
+
+impl DescriptorSet {
+    pub fn handle(&self) -> vk::DescriptorSet {
+        self.handle
+    }
+}
+
+impl Drop for DescriptorSet {
+    fn drop(&mut self) {
+        if self.device.is_null() {
+            return;
+        }
+        let device = unsafe { &*self.device };
+        unsafe {
+            let _ = device.free_descriptor_sets(self.pool.handle, [self.handle].as_slice());
         }
     }
 }
@@ -978,8 +1323,8 @@ impl ComputePipeline {
     ///
     /// Creates a minimal pipeline layout with no descriptor set layouts
     /// and no push constants. This is sufficient for shaders that don't
-    /// yet bind buffers. When descriptor sets are needed, the layout
-    /// creation will be extended.
+    /// bind buffers. For shaders that need descriptor sets, use
+    /// `new_with_layouts`.
     ///
     /// # Errors
     ///
@@ -991,6 +1336,32 @@ impl ComputePipeline {
         shader_module: &ShaderModule,
         entry_point: &str,
     ) -> Result<Self, VulkanError> {
+        Self::new_with_layouts(device, shader_module, entry_point, &[])
+    }
+
+    /// Create a compute pipeline with descriptor set layouts.
+    ///
+    /// This is the full constructor that accepts descriptor set layouts
+    /// for shaders that bind buffers, textures, or other resources.
+    ///
+    /// # Arguments
+    ///
+    /// * `device` - The Vulkan device
+    /// * `shader_module` - The compiled shader module
+    /// * `entry_point` - Name of the entry point function in the shader
+    /// * `set_layouts` - Descriptor set layouts to include in the pipeline layout
+    ///
+    /// # Errors
+    ///
+    /// Returns `VulkanError::InvalidEntryPoint` if the entry point name
+    /// contains a null byte. Returns pipeline creation errors for Vulkan
+    /// API failures.
+    pub fn new_with_layouts(
+        device: &ash::Device,
+        shader_module: &ShaderModule,
+        entry_point: &str,
+        set_layouts: &[vk::DescriptorSetLayout],
+    ) -> Result<Self, VulkanError> {
         let entry_point_cstr = CString::new(entry_point).map_err(|e| {
             VulkanError::InvalidEntryPoint(format!(
                 "entry point name contains invalid bytes: {}",
@@ -998,10 +1369,7 @@ impl ComputePipeline {
             ))
         })?;
 
-        // Create minimal pipeline layout — no descriptor sets, no push constants.
-        // This is valid Vulkan and sufficient for shaders that don't bind resources.
-        // When descriptor sets are needed, extend this with set_layouts.
-        let layout_create_info = vk::PipelineLayoutCreateInfo::builder();
+        let layout_create_info = vk::PipelineLayoutCreateInfo::builder().set_layouts(set_layouts);
 
         let layout = unsafe {
             device
@@ -1020,11 +1388,6 @@ impl ComputePipeline {
             .layout(layout)
             .build();
 
-        // create_compute_pipelines returns (Vec<Pipeline>, Vec<Result>) — the
-        // outer Result is for allocation failures, the inner per-pipeline
-        // Results indicate individual compilation outcomes.
-        // create_compute_pipelines in ash returns Result<Vec<Pipeline>, (Vec<Pipeline>, vk::Result)>.
-        // The error variant carries the partial results when creation is incomplete.
         let pipelines = unsafe {
             match device.create_compute_pipelines(
                 vk::PipelineCache::null(),
@@ -1394,6 +1757,154 @@ impl VulkanContext {
         entry_point: &str,
     ) -> Result<ComputePipeline, VulkanError> {
         ComputePipeline::new(self.device.handle(), shader_module, entry_point)
+    }
+
+    /// Create a compute pipeline with descriptor set layouts.
+    ///
+    /// # Arguments
+    ///
+    /// * `shader_module` - The compiled shader module
+    /// * `entry_point` - Name of the entry point function
+    /// * `set_layouts` - Descriptor set layout handles for the pipeline
+    pub fn create_compute_pipeline_with_layouts(
+        &self,
+        shader_module: &ShaderModule,
+        entry_point: &str,
+        set_layouts: &[vk::DescriptorSetLayout],
+    ) -> Result<ComputePipeline, VulkanError> {
+        ComputePipeline::new_with_layouts(
+            self.device.handle(),
+            shader_module,
+            entry_point,
+            set_layouts,
+        )
+    }
+
+    /// Create a descriptor set layout with a single storage buffer binding.
+    ///
+    /// # Arguments
+    ///
+    /// * `binding` - The binding number (e.g., 0 for `layout(binding = 0)`)
+    pub fn create_descriptor_set_layout_with_buffer(
+        &self,
+        binding: u32,
+    ) -> Result<DescriptorSetLayout, VulkanError> {
+        let binding_info = vk::DescriptorSetLayoutBinding::builder()
+            .binding(binding)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::COMPUTE)
+            .build();
+
+        let bindings = [binding_info];
+        let create_info = vk::DescriptorSetLayoutCreateInfo::builder().bindings(&bindings);
+
+        let handle = unsafe {
+            self.device
+                .handle()
+                .create_descriptor_set_layout(&create_info, None)
+                .map_err(VulkanError::DescriptorSetLayoutCreation)?
+        };
+
+        Ok(DescriptorSetLayout {
+            device: self.device.handle() as *const ash::Device,
+            handle,
+        })
+    }
+
+    /// Create a descriptor set with a single storage buffer binding.
+    ///
+    /// Creates a descriptor pool, allocates a descriptor set, and updates
+    /// it with the given buffer binding. This is the convenience method
+    /// for the common case of a single buffer binding.
+    ///
+    /// # Arguments
+    ///
+    /// * `layout` - The descriptor set layout (must have a storage buffer binding)
+    /// * `binding` - The binding number matching the layout
+    /// * `buffer` - The buffer to bind
+    /// * `range` - Range of the buffer in bytes (use `vk::WHOLE_SIZE` for full buffer)
+    pub fn create_descriptor_set_with_buffer(
+        &self,
+        layout: &DescriptorSetLayout,
+        binding: u32,
+        buffer: &VulkanBuffer,
+        range: vk::DeviceSize,
+    ) -> Result<DescriptorSet, VulkanError> {
+        let device = self.device.handle();
+
+        let pool = DescriptorPool::create(device, 1, &[(vk::DescriptorType::STORAGE_BUFFER, 1)])?;
+
+        let sets = pool.allocate(device, layout.handle, 1)?;
+        let set = sets[0];
+
+        let buffer_info = vk::DescriptorBufferInfo::builder()
+            .buffer(buffer.buffer)
+            .offset(0)
+            .range(range)
+            .build();
+
+        let descriptor_write = {
+            let mut write = vk::WriteDescriptorSet::builder()
+                .dst_set(set)
+                .dst_binding(binding)
+                .dst_array_element(0)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&[buffer_info])
+                .build();
+            write.descriptor_count = 1;
+            write
+        };
+
+        unsafe {
+            device.update_descriptor_sets(&[descriptor_write], &[]);
+        }
+
+        Ok(DescriptorSet {
+            device: device as *const ash::Device,
+            pool: Box::new(pool),
+            handle: set,
+        })
+    }
+
+    /// Read data back from a device-local buffer to host memory.
+    ///
+    /// Creates a host-visible staging buffer, copies data from the source
+    /// buffer, and reads the bytes back. This validates the full readback
+    /// path that will be used for future inference results.
+    ///
+    /// # Arguments
+    ///
+    /// * `src` - The device-local source buffer (must have TRANSFER_SRC usage)
+    /// * `size` - Number of bytes to read back
+    pub fn readback_buffer_data(
+        &self,
+        src: &VulkanBuffer,
+        size: vk::DeviceSize,
+    ) -> Result<Vec<u8>, VulkanError> {
+        let mut staging = self.create_buffer(
+            size,
+            vk::BufferUsageFlags::TRANSFER_SRC
+                | vk::BufferUsageFlags::TRANSFER_DST
+                | vk::BufferUsageFlags::STORAGE_BUFFER,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        )?;
+
+        self.copy_buffer(src, &staging, size)?;
+
+        // Staging buffer is mapped at creation time for HOST_VISIBLE memory.
+        // Unmap and remap to get a fresh pointer, or use existing mapping.
+        if staging.is_mapped() {
+            staging.unmap()?;
+        }
+        let ptr = staging.map()?;
+        let mut data = vec![0u8; size as usize];
+        unsafe {
+            std::ptr::copy_nonoverlapping(ptr, data.as_mut_ptr(), size as usize);
+        }
+        staging.unmap()?;
+
+        Ok(data)
     }
 
     /// Wait for the device to finish all pending work.
@@ -2653,5 +3164,140 @@ mod tests {
         let msg = format!("{}", err);
         assert!(msg.contains("invalid entry point"));
         assert!(msg.contains("null byte"));
+    }
+
+    // --- Descriptor type tests ---
+
+    #[test]
+    fn test_descriptor_set_layout_debug_format() {
+        let layout = DescriptorSetLayout {
+            device: std::ptr::null(),
+            handle: vk::DescriptorSetLayout::null(),
+        };
+        let debug_str = format!("{:?}", layout);
+        assert!(debug_str.contains("DescriptorSetLayout"));
+        assert!(debug_str.contains("handle"));
+    }
+
+    #[test]
+    fn test_descriptor_set_layout_handle_accessor() {
+        let layout = DescriptorSetLayout {
+            device: std::ptr::null(),
+            handle: vk::DescriptorSetLayout::null(),
+        };
+        assert_eq!(layout.handle(), vk::DescriptorSetLayout::null());
+    }
+
+    #[test]
+    fn test_descriptor_set_layout_null_device_safe() {
+        let _layout = DescriptorSetLayout {
+            device: std::ptr::null(),
+            handle: vk::DescriptorSetLayout::null(),
+        };
+    }
+
+    #[test]
+    fn test_descriptor_pool_debug_format() {
+        let pool = DescriptorPool {
+            device: std::ptr::null(),
+            handle: vk::DescriptorPool::null(),
+        };
+        let debug_str = format!("{:?}", pool);
+        assert!(debug_str.contains("DescriptorPool"));
+        assert!(debug_str.contains("handle"));
+    }
+
+    #[test]
+    fn test_descriptor_pool_null_device_safe() {
+        let _pool = DescriptorPool {
+            device: std::ptr::null(),
+            handle: vk::DescriptorPool::null(),
+        };
+    }
+
+    #[test]
+    fn test_descriptor_set_debug_format() {
+        let set = DescriptorSet {
+            device: std::ptr::null(),
+            pool: Box::new(DescriptorPool {
+                device: std::ptr::null(),
+                handle: vk::DescriptorPool::null(),
+            }),
+            handle: vk::DescriptorSet::null(),
+        };
+        let debug_str = format!("{:?}", set);
+        assert!(debug_str.contains("DescriptorSet"));
+        assert!(debug_str.contains("handle"));
+    }
+
+    #[test]
+    fn test_descriptor_set_handle_accessor() {
+        let set = DescriptorSet {
+            device: std::ptr::null(),
+            pool: Box::new(DescriptorPool {
+                device: std::ptr::null(),
+                handle: vk::DescriptorPool::null(),
+            }),
+            handle: vk::DescriptorSet::null(),
+        };
+        assert_eq!(set.handle(), vk::DescriptorSet::null());
+    }
+
+    #[test]
+    fn test_descriptor_set_null_device_safe() {
+        let _set = DescriptorSet {
+            device: std::ptr::null(),
+            pool: Box::new(DescriptorPool {
+                device: std::ptr::null(),
+                handle: vk::DescriptorPool::null(),
+            }),
+            handle: vk::DescriptorSet::null(),
+        };
+    }
+
+    // --- Descriptor/dispatch error display tests ---
+
+    #[test]
+    fn test_error_display_descriptor_set_layout_creation() {
+        let err = VulkanError::DescriptorSetLayoutCreation(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY);
+        assert!(format!("{}", err).contains("descriptor set layout"));
+    }
+
+    #[test]
+    fn test_error_display_descriptor_pool_creation() {
+        let err = VulkanError::DescriptorPoolCreation(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY);
+        assert!(format!("{}", err).contains("descriptor pool"));
+    }
+
+    #[test]
+    fn test_error_display_descriptor_set_allocation() {
+        let err = VulkanError::DescriptorSetAllocation(vk::Result::ERROR_OUT_OF_POOL_MEMORY);
+        assert!(format!("{}", err).contains("descriptor set allocation"));
+    }
+
+    #[test]
+    fn test_error_display_command_buffer_not_recording() {
+        let err = VulkanError::CommandBufferNotRecording;
+        let msg = format!("{}", err);
+        assert!(msg.contains("not in the recording state"));
+    }
+
+    // --- CommandBuffer dispatch state tests ---
+
+    #[test]
+    fn test_command_buffer_recording_state_transitions() {
+        let mut cmd = CommandBuffer {
+            device: std::ptr::null(),
+            command_pool: vk::CommandPool::null(),
+            handle: vk::CommandBuffer::null(),
+            is_recording: false,
+        };
+        assert!(!cmd.is_recording);
+        // Simulate begin
+        cmd.is_recording = true;
+        assert!(cmd.is_recording);
+        // Simulate end
+        cmd.is_recording = false;
+        assert!(!cmd.is_recording);
     }
 }
