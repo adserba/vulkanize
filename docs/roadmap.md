@@ -1,6 +1,6 @@
 # Roadmap — Vulkanize
 
-## Phase 0: Foundation (current)
+## Phase 0: Foundation
 
 - [x] Repository structure, workspace Cargo.toml
 - [x] Crate stubs with correct dependency graph
@@ -17,15 +17,26 @@
 - [x] `TensorDescriptor` struct (name, n_dims, shape, dtype, offset)
 - [x] `parse_gguf_full()` returning header + metadata + tensors
 - [x] `vulkanize inspect` prints tensor summary
-- [x] 91 unit tests with synthetic GGUF byte arrays
-- [ ] Extract architecture metadata (block count, dimensions, types)
+- [x] 106 unit tests with synthetic GGUF byte arrays
+- [x] Extract architecture metadata (block count, dimensions, types)
 - [ ] Integration test against a small GGUF file (e.g., `Qwen2.5-0.5B-Q4_0`)
 
 ## Phase 2: Vulkan backend skeleton
 
-- [ ] Instance creation with validation layers (debug) / without (release)
-- [ ] Physical device selection — prefer AMD vendor ID 0x1002
-- [ ] Device creation with compute queue
+### Phase 2.1: Context skeleton (done)
+
+- [x] Vulkan loader/entry initialization
+- [x] Instance creation with validation layers (debug) / without (release)
+- [x] Physical device enumeration and info collection
+- [x] `PhysicalDeviceInfo` and `QueueFamilyInfo` types
+- [x] Physical device selection — prefer AMD vendor ID 0x1002
+- [x] Logical device creation with compute queue
+- [x] `VulkanContext` owning instance + device + queues
+- [x] `vulkanize vulkan-info` CLI command
+- [x] 22 unit tests for formatting helpers and error types
+
+### Phase 2.2: Buffers and pipelines (next)
+
 - [ ] Buffer allocation helpers (device-local, host-visible staging)
 - [ ] Compute pipeline from `.spv` module
 - [ ] Command buffer record → submit → wait cycle

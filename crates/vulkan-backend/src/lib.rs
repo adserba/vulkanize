@@ -13,6 +13,7 @@ const ENGINE_VERSION: u32 = vk::make_api_version(0, 0, 1, 0);
 const API_VERSION: u32 = vk::API_VERSION_1_1;
 
 /// Validation layer used in debug builds
+#[cfg(debug_assertions)]
 const VALIDATION_LAYERS: &[&str] = &["VK_LAYER_KHRONOS_validation"];
 
 // ---------------------------------------------------------------------------
@@ -220,6 +221,7 @@ impl Drop for VulkanContext {
 // Instance creation
 // ---------------------------------------------------------------------------
 
+#[allow(unused_mut)]
 fn create_instance(entry: &Entry) -> Result<Instance, VulkanError> {
     let app_name_cstr = CString::new(APP_NAME).unwrap();
     let engine_name_cstr = CString::new(ENGINE_NAME).unwrap();
