@@ -1,3 +1,6 @@
+# PLANNED EXAMPLE ONLY: server mode is not implemented, and this unit is not
+# currently usable. Do not install or enable it.
+
 [Unit]
 Description=Vulkanize GGUF Inference Server
 After=network.target
@@ -6,7 +9,8 @@ After=network.target
 Type=simple
 User=vulkanize
 Group=vulkanize
-ExecStart=/usr/local/bin/vulkanize serve --host 127.0.0.1 --port 8000 --model /opt/models/model.gguf
+# Future command shape; the current `serve` command is only a stub.
+ExecStart=/usr/local/bin/vulkanize serve --host 127.0.0.1 --port 8000
 Restart=on-failure
 RestartSec=5
 

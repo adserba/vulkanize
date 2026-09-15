@@ -1,10 +1,12 @@
-# Server Mode — OpenAI-Compatible API
+# Server Mode — Planned OpenAI-Compatible API
+
+> Server mode is planned architecture. `vulkanize serve` is currently a CLI stub and does not start an HTTP server.
 
 ## Overview
 
-`vulkanize serve` exposes an HTTP server compatible with the OpenAI API, allowing any OpenAI client to use Vulkanize as a drop-in local inference backend.
+`vulkanize serve` is intended to expose an HTTP server compatible with the OpenAI API, allowing OpenAI clients to use Vulkanize as a local inference backend once text generation and server mode are implemented.
 
-## Target endpoints
+## Planned endpoints
 
 | Method | Path | Description |
 |---|---|---|
@@ -12,7 +14,7 @@
 | `POST` | `/v1/chat/completions` | Chat completion (streaming and non-streaming) |
 | `POST` | `/v1/completions` | Legacy completion endpoint |
 
-## Request/response types
+## Planned request/response types
 
 ### ChatCompletionRequest
 
@@ -65,7 +67,7 @@ data: [DONE]
 
 ## Architecture
 
-The server is a thin HTTP layer over `vulkanize-runtime`:
+The planned server is a thin HTTP layer over `vulkanize-runtime`:
 
 ```
 HTTP request → api crate validates + deserializes → runtime runs inference →
@@ -79,6 +81,8 @@ api crate serializes response → HTTP response / SSE stream
 - Tokio async runtime for I/O; Vulkan operations are synchronous from the CPU perspective
 
 ## Implementation plan
+
+Current status: `crates/api` is a placeholder crate and `vulkanize serve` exits with `not yet implemented`.
 
 1. **Crate**: `vulkanize-api` provides types and handlers
 2. **Framework**: `axum` (preferred) or `warp` — both work well with tokio

@@ -5,12 +5,11 @@
 ```bash
 cargo build --release    # build all crates
 cargo test               # run all tests
-cargo bench              # run benchmarks (requires --bench flag on individual bins)
 ```
 
 ## Project identity
 
-- AMD-first GGUF inference runtime on Vulkan compute shaders
+- AMD-first GGUF inference runtime under development on Vulkan compute shaders
 - NOT a llama.cpp wrapper — independent implementation; llama.cpp is reference and benchmark only
 - No CUDA, no ROCm/HIP, no llama.cpp runtime dependency
 - CPU is allowed for control flow, parsing, tokenization, sampling, testing, debugging
@@ -22,16 +21,17 @@ cargo bench              # run benchmarks (requires --bench flag on individual b
 |---|---|---|
 | `crates/gguf` | Parse GGUF files, expose metadata + tensor descriptors | Execute any computation |
 | `crates/vulkan-backend` | Vulkan init, buffers, pipelines, shader compilation/SPV loading | Know about GGUF format or inference algorithms |
-| `crates/runtime` | Orchestrate forward pass, KV cache management, sampling loop | Contain GPU driver code or HTTP server code |
-| `crates/api` | OpenAI-compatible API types and request/response handlers | Contain Vulkan or GGUF code directly |
+| `crates/runtime` | Planned: orchestrate forward pass, KV cache management, sampling loop | Contain GPU driver code or HTTP server code |
+| `crates/api` | Planned: OpenAI-compatible API types and request/response handlers | Contain Vulkan or GGUF code directly |
 | `crates/cli` | Binary entrypoint; argument parsing; dispatch to runtime | Duplicate runtime logic |
 
-## CLI commands (design targets)
+## CLI commands
 
 ```
-vulkanize inspect model.gguf              # dump model metadata
-vulkanize generate model.gguf [prompt]    # CLI inference
-vulkanize serve --host 127.0.0.1 --port 8000  # OpenAI API server
+vulkanize inspect model.gguf              # implemented: dump model metadata
+vulkanize vulkan-info                     # implemented: print Vulkan GPU information
+vulkanize generate model.gguf [prompt]    # stub: CLI inference is planned
+vulkanize serve --host 127.0.0.1 --port 8000  # stub: API server is planned
 ```
 
 `cli` and `serve` must share the same `runtime` crate — no duplicated inference paths.
@@ -39,15 +39,15 @@ vulkanize serve --host 127.0.0.1 --port 8000  # OpenAI API server
 ## Shaders
 
 - Live in `shaders/`, written in GLSL, compiled to SPIR-V
-- Compiled at build time or loaded as precompiled `.spv` binaries
+- Compile with `scripts/compile-shaders.sh`, then load the generated `.spv` binaries
 - No runtime shader compilation (avoid `shaderc` dependency if possible; use pre-built SPV)
 
 ## Testing strategy
 
 - Unit tests inline with crate code (`#[cfg(test)]`)
-- Integration tests in `tests/` against real GGUF models
-- Benchmarks in `benches/` — compare output and throughput vs llama.cpp baseline
-- No flaky容忍: all tests must be deterministic or use fixed seeds
+- Ignored hardware-dependent GPU integration tests live in `crates/vulkan-backend/tests/` and require `--ignored`
+- There is currently no benchmark suite
+- Tests must be deterministic or use fixed seeds
 
 ## Commit discipline
 

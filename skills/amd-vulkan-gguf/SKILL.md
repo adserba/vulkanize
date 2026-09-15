@@ -16,7 +16,7 @@ Specialized guidance for implementing AMD-targeted Vulkan compute kernels for tr
 - `docs/amd-vulkan-backend.md` — device selection, memory types, queue families
 - `docs/design.md` — crate contracts, data flow
 - `crates/vulkan-backend/` — Vulkan initialization and pipeline management
-- `shaders/` — GLSL compute shader sources and compiled `.spv` files
+- `shaders/` — tracked GLSL compute shader sources; generated `.spv` files are ignored
 
 ## AMD-specific constraints
 
@@ -28,7 +28,7 @@ Specialized guidance for implementing AMD-targeted Vulkan compute kernels for tr
 ## Kernel development workflow
 
 1. Write shader in `shaders/name.comp.glsl`
-2. Compile to SPIR-V: `glslangValidator -V shaders/name.comp.glsl -o shaders/name.spv`
+2. Compile tracked shaders to SPIR-V with `./scripts/compile-shaders.sh`
 3. Load `.spv` in vulkan-backend, create compute pipeline
 4. Dispatch from runtime with correct workgroup dimensions
 5. Validate output against CPU reference computation

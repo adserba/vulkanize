@@ -6,8 +6,9 @@
 
 - `cargo build --release` — clean, 0 warnings
 - `cargo test` — 316 unit tests pass (158 gguf, 137 vulkan-backend, 21 runtime)
-- `cargo test --test smoke_no_op -- --ignored` — passes (end-to-end GPU dispatch with explicit barriers)
-- `cargo test --test embedding_lookup -- --ignored` — passes (GPU embedding lookup, synthetic F32, validated on AMD Radeon AI PRO R9700 / RADV)
+- `./scripts/compile-shaders.sh` — compiles ignored `.spv` files required by GPU tests
+- `cargo test --test smoke_no_op -- --ignored` — passes after shader compilation (end-to-end GPU dispatch with explicit barriers)
+- `cargo test --test embedding_lookup -- --ignored` — passes after shader compilation (GPU embedding lookup, synthetic F32, validated on AMD Radeon AI PRO R9700 / RADV)
 - `cargo clippy --all-targets --all-features -- -D warnings` — clean
 - 2 integration tests — both ignored by default, pass with `--ignored`
 
@@ -105,9 +106,9 @@
   - Vulkan API failures wrapped as `ShaderModuleCreation(vk::Result)`
 - Error types: `ShaderModuleCreation`, `InvalidSpvBytes(String)`, `SpvLoadingError(String)`
 - `word_count()` accessor on `ShaderModule` for SPIR-V word count
-- `shaders/` directory created for precompiled `.spv` binaries
+- `shaders/` directory contains tracked GLSL sources; generated `.spv` binaries are ignored
 - 13 new unit tests: struct construction (5), word count / byte-to-word logic (4), error display (4)
-- No runtime shader compilation — `.spv` files are prebuilt externally
+- No runtime shader compilation — run `./scripts/compile-shaders.sh` before GPU integration tests
 
 ### Phase 2.3.4: Compute pipeline creation
 
@@ -139,7 +140,7 @@
 - `VulkanContext::readback_buffer_data(src, size)` — device-local → host-visible staging copy → CPU readback
 - `VulkanContext::wait_idle()` — convenience wrapper for `vkDeviceWaitIdle`
 - Error types: `DescriptorSetLayoutCreation`, `DescriptorPoolCreation`, `DescriptorSetAllocation`, `CommandBufferNotRecording`
-- `shaders/no_op.comp.glsl` + `shaders/no_op.spv` — trivial compute shader writing `0x12345678` to storage buffer
+- `shaders/no_op.comp.glsl` — trivial compute shader writing `0x12345678` to storage buffer; `scripts/compile-shaders.sh` generates `shaders/no_op.spv`
 
 ### Phase 2.3.6: Smoke test
 
@@ -178,7 +179,7 @@
 
 ### Phase 3.0: Backend preparation (multi-buffer descriptors, push constants, barriers)
 
-- `shaders/embedding_lookup.comp.glsl` + `shaders/embedding_lookup.spv` — batched embedding lookup shader:
+- `shaders/embedding_lookup.comp.glsl` — batched embedding lookup shader; `scripts/compile-shaders.sh` generates `shaders/embedding_lookup.spv`:
   - 3 storage buffer bindings: embedding weights (float, binding 0), token IDs (uint, binding 1), output hidden state (float, binding 2)
   - Push constants: vocab_size, embedding_dim, batch_size
   - local_size_x = 64 for AMD wavefront alignment
@@ -257,7 +258,7 @@ vulkanize serve                     # stub — exits with "not yet implemented"
 | Compute dispatch | Done |
 | Fence-based synchronization | Done |
 | Explicit memory barriers (transfer↔compute) | Done |
-| Embedding lookup shader (F32) | Done (shader + SPV + GPU smoke test) |
+| Embedding lookup shader (F32) | Done (GLSL source + generated SPV + GPU smoke test) |
 | Embedding lookup GPU smoke test (synthetic F32) | Done (validated on RADV) |
 | GGUF tensor byte size calculation | Done |
 | GGUF token embedding lookup | Done |

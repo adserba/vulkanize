@@ -39,8 +39,11 @@ Guidance for implementing the OpenAI-compatible HTTP API server in `crates/api` 
 
 ## Model lifecycle
 
+This is planned behavior. The current `serve` subcommand is a stub and does
+not load a model or serve HTTP requests.
+
 ```
-serve --model path.gguf
+planned serve command with a configured model path
   → runtime::Model::load(path)   // one-time, at startup
   → serve HTTP requests          // reuse loaded model
   → SIGINT/SIGTERM               → graceful shutdown, unmap GGUF

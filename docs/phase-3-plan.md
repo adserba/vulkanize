@@ -195,7 +195,10 @@ pub fn assert_float_slices_equal(actual: &[f32], expected: &[f32], tolerance: f3
 
 ### Commit 7: integration test
 
-**Files:** `crates/runtime/tests/embedding_lookup.rs`
+**Implemented test location:** `crates/vulkan-backend/tests/embedding_lookup.rs`
+
+The original plan placed this test under `crates/runtime/tests/`; the
+implemented GPU integration test belongs to the Vulkan backend test suite.
 
 ```rust
 #[test]
@@ -229,7 +232,7 @@ fn test_embedding_lookup_f32() {
 ## Shader compilation
 
 ```bash
-glslangValidator -V shaders/embedding_lookup.comp.glsl -o shaders/embedding_lookup.spv
+./scripts/compile-shaders.sh
 ```
 
 Verify `glslangValidator` is installed. If not: `sudo apt install glslang-tools` (Ubuntu/Debian) or `sudo dnf install glslang` (Fedora).
@@ -244,7 +247,7 @@ Verify `glslangValidator` is installed. If not: `sudo apt install glslang-tools`
 - [x] Readback returns correct number of f32 values
 - [x] GPU output matches CPU reference within tolerance
 - [x] Integration test passes with `--ignored`
-- [x] `cargo test` still passes (all 312 unit tests)
+- [x] `cargo test` still passes (312 unit tests at the time of this historical plan)
 - [x] `cargo clippy` is clean
 
 ## Architectural notes

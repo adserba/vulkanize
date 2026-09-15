@@ -15,12 +15,12 @@ Guidance for writing, compiling, and debugging Vulkan compute shaders in GLSL.
 
 - Source: `shaders/name.comp.glsl`
 - Binary: `shaders/name.spv`
-- Both committed to git
+- GLSL sources are committed to git; generated `.spv` files are ignored
 
 ## Compile command
 
 ```bash
-glslangValidator -V shaders/name.comp.glsl -o shaders/name.spv
+./scripts/compile-shaders.sh
 ```
 
 Requires `glslang-tools` package (Debian/Ubuntu) or `glslang` (Arch).

@@ -20,11 +20,11 @@ Guidance for implementing the GGUF file parser in `crates/gguf`.
 ## Parsing checklist
 
 - [ ] Read magic bytes: must be `GGUF` (0x46554747)
-- [ ] Read version field; handle v2 (big-endian) vs v3+ (little-endian)
+- [ ] Read version field; currently accept GGUF v3 only (little-endian)
 - [ ] Walk KV pairs into a typed map
 - [ ] Walk tensor headers into a descriptor list
 - [ ] Validate 32-byte alignment before tensor data region
-- [ ] Memory-map the file for GPU buffer initialization
+- [ ] Memory-map the file for GPU buffer initialization (planned; current parser uses file I/O)
 
 ## Type handling
 
@@ -37,7 +37,7 @@ The parser does NOT dequantize — that happens in GPU shaders.
 
 ## Common pitfalls
 
-- Tensor `offset` is absolute file offset, not relative to data section
+- Tensor `offset` is relative to the aligned tensor-data section; resolve the file position as `data_start + offset`
 - `stride` is in elements, convert to bytes: `stride[i] * type_element_size`
-- String table entries use u32 length prefix, no null terminator
+- GGUF string lengths use a u64 length prefix, with no null terminator
 - Not all models have an `output.weight` tensor — check for weight tying

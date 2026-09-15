@@ -63,7 +63,7 @@ See also: `docs/current-status.md` (what is built), `docs/project-vision.md` (wh
 ### Done
 
 - [x] Write `embedding_lookup.comp.glsl` shader (F32, batched)
-- [x] Compile to SPIR-V, ship as `.spv` in `shaders/`
+- [x] Add reproducible shader compilation script; generated `.spv` files are ignored
 - [x] Backend: extend descriptor support for multi-buffer layouts (3 bindings: weights, token IDs, output)
 - [x] Backend: add push constant support to pipeline layouts (12-byte struct: vocab_size, embedding_dim, batch_size)
 - [x] Backend: explicit transfer↔compute memory barriers

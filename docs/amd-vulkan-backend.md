@@ -3,8 +3,10 @@
 ## Target platform
 
 - **GPU**: AMD Radeon RX 7000 / 6000 series (RDNA3 / RDNA2)
-- **Driver**: RADV (Mesa open-source, Linux primary) or AMDVLK (AMD proprietary, fallback)
-- **OS**: Linux (primary), Windows (secondary via AMDVLK)
+- **Driver**: RADV (Mesa open-source, Linux primary); AMDVLK is a possible future alternative
+- **OS**: Linux (primary); Windows is a future target
+
+Development and GPU validation have primarily been performed with RADV/Mesa on Linux. AMDVLK and Windows are not equally validated.
 
 ## Device selection
 
@@ -115,11 +117,11 @@ Set via environment or `VkDebugUtilsMessengerEXT`. Disable in release builds for
 
 ## SPIR-V compilation
 
-- Shaders written in GLSL, compiled to SPIR-V at build time
+- Shaders written in GLSL, compiled to SPIR-V before GPU integration tests
 - Toolchain: `glslangValidator` from the glslang package
-- Precompiled `.spv` files live in `shaders/` alongside source `.comp.glsl`
-- Build script (`build.rs`) or Makefile target handles compilation
-- Shader sources and SPV binaries are committed to git
+- Generated `.spv` files live in `shaders/` alongside source `.comp.glsl` after compilation
+- `scripts/compile-shaders.sh` handles current shader compilation
+- Shader sources and the compile script are committed to git; generated `.spv` binaries are ignored
 
 ## Performance considerations on AMD
 

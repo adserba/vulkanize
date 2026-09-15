@@ -67,7 +67,7 @@ The `runtime` crate needs to orchestrate the full embedding lookup pipeline:
 ## Risks and challenges
 
 - **Vulkan shader complexity.** Compute shaders for attention and FFN are substantially more complex than CPU code. Expect iteration on workgroup sizing, shared memory usage, and memory access patterns.
-- **AMD driver differences.** RADV (Mesa) and AMDVLK may behave differently. Test on the target driver early.
+- **AMD driver differences.** Current development and GPU validation are primarily on Linux with AMD RADV/Mesa. AMDVLK remains a possible future compatibility/testing target and has not been equally validated.
 - **RADV-specific Vulkan pitfalls** (discovered Phase 3.2):
   - NULL buffer handles in `vkCmdPipelineBarrier` cause GPUVM faults — always pass actual buffer handles
   - `DescriptorBufferInfo` holds raw `vk::Buffer` handles — ensure `VulkanBuffer` RAII wrappers outlive descriptor set updates

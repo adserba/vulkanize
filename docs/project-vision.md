@@ -1,8 +1,10 @@
 # Project Vision — Vulkanize
 
-## What Vulkanize is
+## What Vulkanize is intended to become
 
-Vulkanize is an AMD-first GGUF inference runtime built natively on Vulkan compute shaders. It reads GGUF model files, executes the full transformer forward pass on the GPU, and produces token outputs — without depending on llama.cpp, CUDA, or ROCm.
+Vulkanize is an AMD-first GGUF inference runtime being built natively on Vulkan compute shaders. The target is to read GGUF model files, execute the full transformer forward pass on the GPU, and produce token outputs without depending on llama.cpp, CUDA, or ROCm.
+
+Current implementation status: Vulkanize can parse GGUF v3 model structure, inspect model metadata, create and use Vulkan compute resources, and validate synthetic GPU embedding lookup on real hardware. Full model inference, text generation, server mode, KV cache management, tokenizer integration, and sampling are planned but not implemented yet.
 
 ## Core principle
 
@@ -14,11 +16,11 @@ Vulkanize is not only meant to run GGUF models — it is meant to run them effic
 
 **Vulkan-native.** Not a wrapper around another GPU runtime. Vulkan compute shaders are the sole execution path for tensor math. The `ash` crate provides thin bindings to the Vulkan C API — no higher-level abstraction that hides synchronization or memory management.
 
-**GGUF-focused.** GGUF is the model format. The parser is a first-class component, not an afterthought. Vulkanize understands GGUF tensor layouts, quantization types, and architecture metadata.
+**GGUF-focused.** GGUF is the model format. The parser is a first-class component, not an afterthought. Vulkanize currently supports GGUF v3 parsing and exposes tensor layouts, quantization type identifiers, and architecture metadata needed by later runtime phases.
 
-**Performance-oriented.** The project exists to deliver fast inference on consumer AMD GPUs. Compatibility is necessary but not sufficient. Kernel fusion, memory layout, wavefront alignment, and matrix-core utilization are first-class concerns.
+**Performance-oriented.** The project exists to deliver fast inference on consumer AMD GPUs. Compatibility is necessary but not sufficient. Kernel fusion, memory layout, wavefront alignment, and matrix-core utilization are first-class design concerns for later inference kernels.
 
-**Independent implementation.** Vulkanize is NOT a llama.cpp wrapper. llama.cpp serves only as a reference implementation for numerical correctness and as a benchmark baseline. Vulkanize has its own parser, its own kernels, its own runtime.
+**Independent implementation.** Vulkanize is NOT a llama.cpp wrapper. llama.cpp serves only as a reference implementation for numerical correctness and as a future benchmark baseline. Vulkanize has its own parser and Vulkan kernels; the full runtime is still being built.
 
 ## Runtime controls (design requirement)
 

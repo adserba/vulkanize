@@ -113,6 +113,10 @@ Not all models have `output.weight` — some tie weights to the embedding matrix
 
 ## Reference implementations
 
+Vulkanize's GGUF implementation was developed with the GGUF/ggml format
+definitions from llama.cpp as a format reference. Vulkanize does not contain
+or vendor llama.cpp implementation code.
+
 - `llama.cpp/gguf.h` — authoritative C header
 - `llama.cpp/gguf-reader.cpp` — reference parser
 - These are for understanding format details only; do NOT vendor this code.

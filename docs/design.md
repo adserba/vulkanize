@@ -39,7 +39,7 @@ Vulkanize is not only meant to run GGUF models — it is meant to run them effic
 - Expose `TensorDescriptor` (name, n_dims, shape, dtype, offset) — **implemented**
 - Expose `GgufTensorType` (36 GGML tensor data types) — **implemented**
 - Expose `parse_gguf_full()` returning `(GgufHeader, GgufMetadata, GgufTensors)` — **implemented**
-- Memory-map the file; do NOT copy weights into CPU memory — pass file handle + offsets to runtime
+- Planned: memory-map the file; do NOT copy weights into CPU memory — pass file handle + offsets to runtime
 - **Must not** execute any tensor computation or depend on Vulkan
 
 ### `vulkanize-vulkan-backend`
@@ -53,6 +53,8 @@ Vulkanize is not only meant to run GGUF models — it is meant to run them effic
 
 ### `vulkanize-runtime`
 
+Current status: partial. The crate currently contains CPU reference helpers for embedding lookup validation. The responsibilities below are planned architecture for the full runtime.
+
 - Owns the inference lifecycle: model load → warm-up → forward pass → sampling loop
 - Manages KV cache allocation, position tracking, context window management
 - Schedules compute dispatches via vulkan-backend
@@ -62,18 +64,24 @@ Vulkanize is not only meant to run GGUF models — it is meant to run them effic
 
 ### `vulkanize-api`
 
+Current status: stub. The API types and handlers below are planned architecture for server mode.
+
 - OpenAI-compatible JSON types: `ChatCompletionRequest`, `ChatCompletionResponse`, `StreamEvent`
 - Request handlers that call into runtime
 - **Must not** contain Vulkan or GGUF code directly
 
 ### `vulkanize` (cli)
 
+Current status: `inspect` and `vulkan-info` are implemented. `generate` and `serve` are command stubs.
+
 - Subcommands: `inspect`, `generate`, `serve`
-- Delegates all inference work to runtime
-- Delegates API serving to api crate
+- Planned: delegate all inference work to runtime
+- Planned: delegate API serving to api crate
 - Handles signal trapping, progress reporting, stderr logging
 
-## Data flow — forward pass
+## Planned data flow — forward pass
+
+The full forward pass below is not implemented yet. It describes the target runtime architecture.
 
 1. Runtime receives token IDs from tokenizer/sampler
 2. Embedding lookup: dispatch compute shader with token indices → hidden state buffer
@@ -86,7 +94,7 @@ Vulkanize is not only meant to run GGUF models — it is meant to run them effic
 
 | Decision | Rationale |
 |---|---|
-| Vulkan over ROCm | Single portable API; works on Linux with RADV/Mesa and Windows with AMDVLK |
+| Vulkan over ROCm | Single portable API; current development and validation use Linux with RADV/Mesa; other drivers are future targets |
 | SPIR-V precompiled | Avoids runtime shader compilation overhead and complexity |
 | Memory-map GGUF | Zero-copy weight loading; GPU reads directly via buffer views where possible |
 | No CUDA path | Scope discipline; AMD is the target, cross-platform GPU adds maintenance burden |
